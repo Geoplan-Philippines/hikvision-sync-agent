@@ -1,12 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { parseStringPromise } from 'xml2js';
+import { writeLog as log } from './logger.js';
 
 const EVENT_PATH = '/ISAPI/AccessControl/AcsEvent?format=json';
 const DEFAULT_TIMEOUT_MS = 8_000;
 const MAX_REQUESTS_PER_DIGEST_SESSION = 8;
-
-type LogLevel = 'info' | 'warn' | 'error';
-type LogDetails = Record<string, unknown>;
 
 export interface AttendanceQuery {
   searchId: string;
@@ -32,11 +30,6 @@ interface DigestAuthorizationInput {
   challenge: DigestChallenge;
   nonceCount: number;
   cnonce: string;
-}
-
-export function log(level: LogLevel, event: string, details: LogDetails = {}): void {
-  const method = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
-  method(JSON.stringify({ timestamp: new Date().toISOString(), level, event, ...details }));
 }
 
 export function getErrorDetails(error: unknown): { message: string; code?: unknown } {

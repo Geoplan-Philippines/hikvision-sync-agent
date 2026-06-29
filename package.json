@@ -11,6 +11,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:digest": "npm run build && node scripts/test-digest.mjs",
     "test:renderer": "npm run build && node scripts/test-renderer.mjs",
+    "test:schedule": "npm run build && node scripts/test-schedule.mjs",
+    "test:logger": "npm run build && node scripts/test-logger.mjs",
     "start": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win nsis --x64"
   },

@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import axios from 'axios';
 import hikvision from './hikvision.js';
+import { writeLog as log } from './logger.js';
 
 
 const PAGE_SIZE = 30;
@@ -11,11 +12,11 @@ const MAX_SYNCED_IDS = 20_000;
 const MAX_RETRY_ATTEMPTS = 10;
 const RETRY_BASE_MS = 10_000;
 const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const STATE_VERSION = 2;
 
 const statePath = path.resolve(process.env.SYNC_STATE_FILE ?? path.join(process.cwd(), '.sync-state.json'));
 
-type LogLevel = 'info' | 'warn' | 'error';
 type UnknownRecord = Record<string, unknown>;
 
 export interface BiometricEvent {
@@ -43,11 +44,6 @@ interface FetchResult {
 }
 
 let running = false;
-
-function log(level: LogLevel, event: string, details: UnknownRecord = {}): void {
-  const method = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
-  method(JSON.stringify({ timestamp: new Date().toISOString(), level, event, ...details }));
-}
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -154,6 +150,19 @@ export function dailySyncWindow(now: Date): { start: Date; end: Date } {
     start: manilaInstantForTime(now, process.env.SYNC_START_TIME ?? '09:00'),
     end: manilaInstantForTime(now, process.env.SYNC_END_TIME ?? '20:00'),
   };
+}
+
+export function eventWindowStart(
+  lastSeenAt: string | null,
+  dailyWindow: { start: Date; end: Date },
+): { start: Date; mode: 'morning_catch_up' | 'interval_rescan' } {
+  const lastSeen = lastSeenAt ? new Date(lastSeenAt) : null;
+  const needsMorningCatchUp = !lastSeen ||
+    Number.isNaN(lastSeen.getTime()) ||
+    lastSeen < dailyWindow.start;
+  return needsMorningCatchUp
+    ? { start: new Date(dailyWindow.end.getTime() - DAY_MS), mode: 'morning_catch_up' }
+    : { start: dailyWindow.start, mode: 'interval_rescan' };
 }
 
 function isBiometricEvent(value: unknown): value is BiometricEvent {
@@ -332,6 +341,25 @@ export default async function sync(): Promise<void> {
   running = true;
 
   try {
+    const now = new Date();
+    const dailyWindow = dailySyncWindow(now);
+    if (now < dailyWindow.start) {
+      log('info', 'SYNC WINDOW NOT OPEN', {
+        opensAt: dailyWindow.start.toISOString(),
+        opensAtManila: formatManilaTime(dailyWindow.start),
+        reason: 'No VPS or Hikvision request was sent.',
+      });
+      return;
+    }
+    if (now >= dailyWindow.end) {
+      log('info', 'SYNC WINDOW CLOSED', {
+        closedAt: dailyWindow.end.toISOString(),
+        closedAtManila: formatManilaTime(dailyWindow.end),
+        reason: 'No VPS or Hikvision request was sent.',
+      });
+      return;
+    }
+
     const state = await loadState();
     const registeredIds = await fetchRegisteredBiometricIds();
     const queuedBeforeFiltering = state.retryQueue.length;
@@ -341,22 +369,9 @@ export default async function sync(): Promise<void> {
       log('warn', 'UNREGISTERED BIOMETRIC EVENTS SKIPPED', { count: skippedQueued, source: 'retry_queue' });
     }
     let synced = await processRetries(state);
-    const now = new Date();
-    const dailyWindow = dailySyncWindow(now);
-
-    if (now < dailyWindow.start) {
-      await saveState(state);
-      log('info', 'SYNC WINDOW NOT OPEN', {
-        opensAt: dailyWindow.start.toISOString(),
-        opensAtManila: formatManilaTime(dailyWindow.start),
-        syncedRetries: synced,
-        queued: state.retryQueue.length,
-      });
-      return;
-    }
-
-    const end = now < dailyWindow.end ? now : dailyWindow.end;
-    const start = dailyWindow.start;
+    const end = now;
+    const eventWindow = eventWindowStart(state.lastSeenAt, dailyWindow);
+    const start = eventWindow.start;
 
     const result = await fetchAllEvents(start, end);
     const normalized = result.events
@@ -380,6 +395,7 @@ export default async function sync(): Promise<void> {
       windowEnd: end.toISOString(),
       windowStartManila: formatManilaTime(start),
       windowEndManila: formatManilaTime(end),
+      mode: eventWindow.mode,
     });
 
     for (const event of pending) {

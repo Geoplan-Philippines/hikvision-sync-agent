@@ -160,7 +160,7 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
         time.textContent = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'Unknown time';
         const badge = document.createElement('span'); badge.className = 'log-level'; badge.textContent = level;
         const event = document.createElement('span'); event.className = 'log-event';
-        const rawEvent = String(entry.event || 'LOG'); event.textContent = eventNames[rawEvent] || rawEvent.replaceAll('_', ' ').toLowerCase();
+        const rawEvent = String(entry.event || 'Log message'); event.textContent = eventNames[rawEvent] || rawEvent.replaceAll('_', ' ');
         title.append(time, badge, event); row.appendChild(title);
         const details = Object.fromEntries(Object.entries(entry).filter(([key]) => !['timestamp', 'level', 'event'].includes(key)));
         if (Object.keys(details).length) { const pre = document.createElement('pre'); pre.className = 'log-details'; pre.textContent = JSON.stringify(details, null, 2); row.appendChild(pre); }

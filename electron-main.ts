@@ -23,10 +23,13 @@ import {
   type AgentConfig,
 } from './src/config.js';
 import { CONFIG_WINDOW_HTML } from './src/window-content.js';
+import { writeLog as log } from './src/logger.js';
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const preloadPath = path.join(app.getAppPath(), 'preload.cjs');
 const logPath = path.join(appDirectory, 'agent.log');
+const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 interface AgentStatus {
   message: string;
@@ -43,11 +46,6 @@ let logStream: WriteStream | null = null;
 let forceQuit = false;
 let status: AgentStatus = { message: 'Configuration required.', lastRun: null, running: false };
 let syncModule: Promise<typeof import('./src/sync.js')> | null = null;
-
-function log(level: 'info' | 'warn' | 'error', event: string, details: Record<string, unknown> = {}): void {
-  const method = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
-  method(JSON.stringify({ timestamp: new Date().toISOString(), level, event, ...details }));
-}
 
 function enableFileLogging(): void {
   mkdirSync(appDirectory, { recursive: true });
@@ -158,25 +156,60 @@ function environmentDefaults(): AgentConfig {
   };
 }
 
+function configuredWindow(now: Date, config: AgentConfig): { start: Date; end: Date } {
+  const local = new Date(now.getTime() + MANILA_OFFSET_MS);
+  const instant = (time: string): Date => {
+    const [hour, minute] = time.split(':').map(Number);
+    return new Date(Date.UTC(
+      local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate(), hour, minute,
+    ) - MANILA_OFFSET_MS);
+  };
+  return { start: instant(config.SYNC_START_TIME), end: instant(config.SYNC_END_TIME) };
+}
+
 function scheduleNextSync(): void {
   if (syncTimer) clearTimeout(syncTimer);
   if (!currentConfig || forceQuit) return;
-  syncTimer = setTimeout(() => void runSyncCycle(), currentConfig.SYNC_INTERVAL_MINUTES * 60_000);
+  const now = new Date();
+  const window = configuredWindow(now, currentConfig);
+  const intervalMs = currentConfig.SYNC_INTERVAL_MINUTES * 60_000;
+  let delayMs: number;
+  if (now < window.start) {
+    delayMs = window.start.getTime() - now.getTime();
+  } else if (now >= window.end) {
+    delayMs = window.start.getTime() + DAY_MS - now.getTime();
+  } else {
+    delayMs = Math.min(intervalMs, window.end.getTime() - now.getTime());
+  }
+  syncTimer = setTimeout(() => void runSyncCycle(), Math.max(1_000, delayMs));
 }
 
-async function runSyncCycle(): Promise<void> {
-  if (!currentConfig || syncInProgress) return;
+async function runSyncCycle(): Promise<'completed' | 'paused' | 'busy' | 'unconfigured'> {
+  if (!currentConfig) return 'unconfigured';
+  if (syncInProgress) return 'busy';
   if (syncTimer) clearTimeout(syncTimer);
-  syncInProgress = true;
-  setStatus('Synchronizing…', { running: true });
   try {
     const module = await (syncModule ??= import('./src/sync.js'));
+    const now = new Date();
+    const dailyWindow = module.dailySyncWindow(now);
+    if (now < dailyWindow.start || now >= dailyWindow.end) {
+      setStatus(
+        `Paused — daily window is ${currentConfig.SYNC_START_TIME}–${currentConfig.SYNC_END_TIME} Asia/Manila.`,
+        { running: false },
+      );
+      return 'paused';
+    }
+
+    syncInProgress = true;
+    setStatus('Synchronizing…', { running: true });
     await module.default();
     setStatus('Running in system tray.', { running: false, lastRun: new Date().toISOString() });
+    return 'completed';
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log('error', 'SYNC CYCLE FAILED', { message });
     setStatus(`Sync failed: ${message}`, { running: false, lastRun: new Date().toISOString() });
+    return 'completed';
   } finally {
     syncInProgress = false;
     scheduleNextSync();
@@ -202,7 +235,15 @@ async function readRecentLogs(): Promise<unknown[]> {
         try {
           return JSON.parse(line) as unknown;
         } catch {
-          return { timestamp: null, level: 'info', event: 'RAW LOG', message: line };
+          const match = line.match(/^(\S+) \[(INFO|WARN|ERROR)] (.*?)(?: — (.*))?$/);
+          return match
+            ? {
+                timestamp: match[1],
+                level: match[2].toLowerCase(),
+                event: match[3],
+                message: match[4] ?? '',
+              }
+            : { timestamp: null, level: 'info', event: 'Log message', message: line };
         }
       })
       .reverse();
@@ -269,8 +310,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle('sync:now', async () => {
     if (!currentConfig) return { ok: false, message: 'Save configuration first.' };
     if (syncInProgress) return { ok: false, message: 'A sync cycle is already running.' };
-    await runSyncCycle();
-    return { ok: true, message: 'Sync cycle completed.' };
+    const outcome = await runSyncCycle();
+    return outcome === 'paused'
+      ? { ok: false, message: 'Outside the configured daily window. No sync request was sent.' }
+      : { ok: true, message: 'Sync cycle completed.' };
   });
   ipcMain.handle('config:save', async (_event, value: unknown) => {
     try {
