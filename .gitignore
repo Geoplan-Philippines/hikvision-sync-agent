@@ -1,0 +1,6 @@
+.env
+dist
+.sync-state.json
+.sync-state.json.tmp
+
+node_modules
