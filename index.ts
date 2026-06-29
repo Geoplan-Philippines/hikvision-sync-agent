@@ -112,7 +112,7 @@ async function main(): Promise<void> {
   const standalone = isSea();
   if (!standalone) dotenv.config({ path: path.resolve('.env'), quiet: true });
 
-  const command = standalone ? process.argv[1] : process.argv[2];
+  const command = process.argv[2];
   if (command === '--help' || command === '-h') {
     printHelp();
     return;
