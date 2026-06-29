@@ -29,8 +29,6 @@ export const appDirectory = path.join(
 );
 export const configPath = path.join(appDirectory, 'config.json');
 export const statePath = path.join(appDirectory, 'sync-state.json');
-export const lockPath = path.join(appDirectory, 'agent.lock');
-export const installedExecutablePath = path.join(appDirectory, 'Meedo-Hikvision-Sync-Agent.exe');
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

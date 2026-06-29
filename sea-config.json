@@ -1,7 +1,0 @@
-{
-  "main": "build/agent.cjs",
-  "output": "build/meedo-agent.blob",
-  "disableExperimentalSEAWarning": true,
-  "useSnapshot": false,
-  "useCodeCache": false
-}

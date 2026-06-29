@@ -1,17 +1,16 @@
 {
   "name": "hikvision-sync-agent",
   "version": "1.0.0",
-  "description": "",
-  "main": "dist/index.js",
-  "exports": "./dist/index.js",
+  "description": "Meedo Hikvision attendance synchronization tray application",
+  "productName": "Meedo Hikvision Sync Agent",
+  "private": true,
+  "main": "dist/electron-main.js",
   "scripts": {
     "clean": "node scripts/clean.mjs",
     "build": "npm run clean && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "bundle": "npm run build && esbuild dist/index.js --bundle --platform=node --format=cjs --target=node25 --external:node-fetch --outfile=build/agent.cjs",
-    "package:exe": "npm run bundle && node --experimental-sea-config sea-config.json && node scripts/build-exe.mjs",
-    "prestart": "npm run build",
-    "start": "node --enable-source-maps dist/index.js"
+    "start": "npm run build && electron .",
+    "dist:win": "npm run build && electron-builder --win nsis --x64"
   },
   "keywords": [],
   "author": "",
@@ -29,8 +28,33 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/xml2js": "^0.4.14",
-    "esbuild": "^0.25.0",
-    "postject": "^1.0.0-alpha.6",
+    "electron": "^37.10.3",
+    "electron-builder": "^26.15.3",
     "typescript": "^5.7.3"
+  },
+  "build": {
+    "appId": "com.geoplan.meedo.hikvision-sync-agent",
+    "productName": "Meedo Hikvision Sync Agent",
+    "artifactName": "Meedo-Hikvision-Sync-Agent-Setup-${version}.${ext}",
+    "asar": true,
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "runAfterFinish": true,
+      "include": "installer.nsh"
+    }
   }
 }
