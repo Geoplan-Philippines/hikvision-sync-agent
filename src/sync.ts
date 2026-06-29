@@ -244,6 +244,9 @@ async function postEvent(event: BiometricEvent): Promise<void> {
 }
 
 async function fetchAllEvents(start: Date, end: Date): Promise<FetchResult> {
+  if (!hikvision.beginEventSearch()) {
+    return { events: [], complete: false };
+  }
   const searchId = String(Math.floor(Math.random() * 1_000_000_000));
   const events: UnknownRecord[] = [];
   let position = 0;

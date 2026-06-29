@@ -6,11 +6,11 @@ import dotenv from 'dotenv';
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
   nativeImage,
-  shell,
   Tray,
 } from 'electron';
 import {
@@ -25,7 +25,7 @@ import {
 import { CONFIG_WINDOW_HTML } from './src/window-content.js';
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-const preloadPath = path.join(moduleDirectory, 'preload.js');
+const preloadPath = path.join(app.getAppPath(), 'preload.cjs');
 const logPath = path.join(appDirectory, 'agent.log');
 
 interface AgentStatus {
@@ -77,7 +77,7 @@ function updateTrayMenu(): void {
     { type: 'separator' },
     { label: 'Open settings', click: () => showWindow() },
     { label: 'Sync now', enabled: Boolean(currentConfig) && !syncInProgress, click: () => void runSyncCycle() },
-    { label: 'Open logs', click: () => void openLogs() },
+    { label: 'View logs', click: () => openLogViewer() },
     { type: 'separator' },
     { label: 'Uninstall permanently…', click: () => void launchUninstaller() },
     { label: 'Quit until next login', click: () => { forceQuit = true; app.quit(); } },
@@ -107,6 +107,18 @@ function createWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: false,
     },
+  });
+  window.webContents.on('preload-error', (_event, preload, error) => {
+    log('error', 'PRELOAD FAILED', { preload, message: error.message, stack: error.stack });
+  });
+  window.webContents.on('console-message', (details) => {
+    if (details.level === 'error' || details.level === 'warning') {
+      log(details.level === 'error' ? 'error' : 'warn', 'RENDERER MESSAGE', {
+        message: details.message,
+        lineNumber: details.lineNumber,
+        sourceId: details.sourceId,
+      });
+    }
   });
   window.on('close', (event) => {
     if (!forceQuit) {
@@ -171,11 +183,42 @@ async function runSyncCycle(): Promise<void> {
   }
 }
 
-async function openLogs(): Promise<void> {
+async function readRecentLogs(): Promise<unknown[]> {
   await fs.mkdir(appDirectory, { recursive: true });
   await fs.appendFile(logPath, '');
-  const error = await shell.openPath(logPath);
-  if (error) await dialog.showMessageBox({ type: 'error', message: 'Unable to open logs.', detail: error });
+  const handle = await fs.open(logPath, 'r');
+  try {
+    const { size } = await handle.stat();
+    const maxBytes = 1_000_000;
+    const start = Math.max(0, size - maxBytes);
+    const buffer = Buffer.alloc(size - start);
+    await handle.read(buffer, 0, buffer.length, start);
+    const lines = buffer.toString('utf8').split(/\r?\n/);
+    if (start > 0) lines.shift();
+    return lines
+      .filter((line) => line.trim().length > 0)
+      .slice(-1_000)
+      .map((line) => {
+        try {
+          return JSON.parse(line) as unknown;
+        } catch {
+          return { timestamp: null, level: 'info', event: 'RAW LOG', message: line };
+        }
+      })
+      .reverse();
+  } finally {
+    await handle.close();
+  }
+}
+
+function openLogViewer(): void {
+  showWindow();
+  if (!mainWindow) return;
+  if (mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.once('did-finish-load', () => mainWindow?.webContents.send('logs:open-viewer'));
+  } else {
+    mainWindow.webContents.send('logs:open-viewer');
+  }
 }
 
 async function findUninstaller(): Promise<string | null> {
@@ -213,7 +256,16 @@ function registerIpcHandlers(): void {
   ipcMain.handle('config:get', () => currentConfig ?? environmentDefaults());
   ipcMain.handle('status:get', () => status);
   ipcMain.handle('window:hide', () => mainWindow?.hide());
-  ipcMain.handle('logs:open', () => openLogs());
+  ipcMain.handle('logs:get', () => readRecentLogs());
+  ipcMain.handle('logs:copy', (_event, text: unknown) => {
+    clipboard.writeText(typeof text === 'string' ? text : '');
+  });
+  ipcMain.handle('logs:clear', async () => {
+    await fs.mkdir(appDirectory, { recursive: true });
+    await fs.truncate(logPath, 0).catch(async () => fs.writeFile(logPath, ''));
+    log('info', 'LOGS CLEARED');
+    return { ok: true };
+  });
   ipcMain.handle('sync:now', async () => {
     if (!currentConfig) return { ok: false, message: 'Save configuration first.' };
     if (syncInProgress) return { ok: false, message: 'A sync cycle is already running.' };

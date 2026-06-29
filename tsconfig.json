@@ -13,6 +13,6 @@
     "declaration": true,
     "types": ["node"]
   },
-  "include": ["electron-main.ts", "preload.ts", "src/**/*.ts"],
+  "include": ["electron-main.ts", "src/**/*.ts"],
   "exclude": ["dist", "node_modules"]
 }
