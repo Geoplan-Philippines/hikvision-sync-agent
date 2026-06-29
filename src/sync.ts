@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import axios from 'axios';
 import hikvision from './hikvision.js';
 
@@ -11,19 +10,10 @@ const MAX_PAGES = 100;
 const MAX_SYNCED_IDS = 20_000;
 const MAX_RETRY_ATTEMPTS = 10;
 const RETRY_BASE_MS = 10_000;
-const OVERLAP_MS = 5 * 60 * 1000;
 const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
+const STATE_VERSION = 2;
 
-const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-const parentDirectory = path.dirname(moduleDirectory);
-const projectDirectory = path.basename(moduleDirectory) === 'src'
-  ? path.basename(parentDirectory) === 'dist'
-    ? path.dirname(parentDirectory)
-    : parentDirectory
-  : path.basename(moduleDirectory) === 'dist'
-    ? parentDirectory
-    : moduleDirectory;
-const statePath = path.resolve(projectDirectory, process.env.SYNC_STATE_FILE ?? '.sync-state.json');
+const statePath = path.resolve(process.env.SYNC_STATE_FILE ?? path.join(process.cwd(), '.sync-state.json'));
 
 type LogLevel = 'info' | 'warn' | 'error';
 type UnknownRecord = Record<string, unknown>;
@@ -41,6 +31,7 @@ interface RetryItem {
 }
 
 interface SyncState {
+  version: number;
   syncedIds: string[];
   lastSeenAt: string | null;
   retryQueue: RetryItem[];
@@ -144,12 +135,25 @@ export function formatManilaTime(date: Date): string {
     `T${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}:${pad(shifted.getUTCSeconds())}+08:00`;
 }
 
-function initialWindowStart(now: Date): Date {
+function manilaInstantForTime(now: Date, time: string): Date {
   const local = new Date(now.getTime() + MANILA_OFFSET_MS);
-  const hour = local.getUTCHours() >= 9 ? 9 : 0;
+  const [hour, minute] = time.split(':').map(Number);
   return new Date(
-    Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate(), hour) - MANILA_OFFSET_MS,
+    Date.UTC(
+      local.getUTCFullYear(),
+      local.getUTCMonth(),
+      local.getUTCDate(),
+      hour,
+      minute,
+    ) - MANILA_OFFSET_MS,
   );
+}
+
+export function dailySyncWindow(now: Date): { start: Date; end: Date } {
+  return {
+    start: manilaInstantForTime(now, process.env.SYNC_START_TIME ?? '09:00'),
+    end: manilaInstantForTime(now, process.env.SYNC_END_TIME ?? '20:00'),
+  };
 }
 
 function isBiometricEvent(value: unknown): value is BiometricEvent {
@@ -171,8 +175,10 @@ async function loadState(): Promise<SyncState> {
   try {
     const parsed = JSON.parse(await fs.readFile(statePath, 'utf8')) as unknown;
     const record = isRecord(parsed) ? parsed : {};
+    const isCurrentVersion = record.version === STATE_VERSION;
     return {
-      syncedIds: Array.isArray(record.syncedIds)
+      version: STATE_VERSION,
+      syncedIds: isCurrentVersion && Array.isArray(record.syncedIds)
         ? record.syncedIds.filter((id): id is string => typeof id === 'string').slice(-MAX_SYNCED_IDS)
         : [],
       lastSeenAt: typeof record.lastSeenAt === 'string' ? record.lastSeenAt : null,
@@ -186,7 +192,7 @@ async function loadState(): Promise<SyncState> {
         message: error instanceof Error ? error.message : String(error),
       });
     }
-    return { syncedIds: [], lastSeenAt: null, retryQueue: [] };
+    return { version: STATE_VERSION, syncedIds: [], lastSeenAt: null, retryQueue: [] };
   }
 }
 
@@ -207,14 +213,31 @@ async function saveState(state: SyncState): Promise<void> {
   }
 }
 
-function apiUrl(): string {
+function apiUrl(path: string): string {
   const base = (process.env.VPS_URL ?? '').replace(/\/+$/, '');
   if (!base) throw new Error('Missing required environment variable: VPS_URL');
-  return `${base}/attendance/event`;
+  return `${base}/attendance/${path}`;
+}
+
+async function fetchRegisteredBiometricIds(): Promise<Set<string>> {
+  const response = await axios.get(apiUrl('biometrics/ids'), {
+    timeout: Number(process.env.VPS_TIMEOUT_MS) || 8_000,
+  });
+  const envelope = response.data as unknown;
+  const payload = isRecord(envelope) && isRecord(envelope.data) ? envelope.data : envelope;
+  const ids = isRecord(payload) ? payload.biometricsIds : undefined;
+  if (!Array.isArray(ids)) {
+    throw new Error('VPS biometric ID response is malformed.');
+  }
+  const registeredIds = new Set(
+    ids.filter((id): id is string => typeof id === 'string' && id.trim().length > 0),
+  );
+  log('info', 'REGISTERED BIOMETRIC IDS', { count: registeredIds.size });
+  return registeredIds;
 }
 
 async function postEvent(event: BiometricEvent): Promise<void> {
-  await axios.post(apiUrl(), event, {
+  await axios.post(apiUrl('event'), event, {
     timeout: Number(process.env.VPS_TIMEOUT_MS) || 8_000,
     validateStatus: (status) => (status >= 200 && status < 300) || status === 409,
   });
@@ -307,36 +330,59 @@ export default async function sync(): Promise<void> {
 
   try {
     const state = await loadState();
+    const registeredIds = await fetchRegisteredBiometricIds();
+    const queuedBeforeFiltering = state.retryQueue.length;
+    state.retryQueue = state.retryQueue.filter((item) => registeredIds.has(item.event.biometricsId));
+    const skippedQueued = queuedBeforeFiltering - state.retryQueue.length;
+    if (skippedQueued > 0) {
+      log('warn', 'UNREGISTERED BIOMETRIC EVENTS SKIPPED', { count: skippedQueued, source: 'retry_queue' });
+    }
     let synced = await processRetries(state);
     const now = new Date();
-    const storedStart = state.lastSeenAt ? new Date(state.lastSeenAt) : null;
-    const start = storedStart && !Number.isNaN(storedStart.getTime())
-      ? new Date(storedStart.getTime() - OVERLAP_MS)
-      : initialWindowStart(now);
+    const dailyWindow = dailySyncWindow(now);
 
-    const result = await fetchAllEvents(start, now);
+    if (now < dailyWindow.start) {
+      await saveState(state);
+      log('info', 'SYNC WINDOW NOT OPEN', {
+        opensAt: dailyWindow.start.toISOString(),
+        opensAtManila: formatManilaTime(dailyWindow.start),
+        syncedRetries: synced,
+        queued: state.retryQueue.length,
+      });
+      return;
+    }
+
+    const end = now < dailyWindow.end ? now : dailyWindow.end;
+    const start = dailyWindow.start;
+
+    const result = await fetchAllEvents(start, end);
     const normalized = result.events
       .map(normalizeEvent)
       .filter((event): event is BiometricEvent => event !== null);
     const unique = [...new Map(normalized.map((event) => [event.externalId, event])).values()];
+    const known = unique.filter((event) => registeredIds.has(event.biometricsId));
     const syncedIds = new Set(state.syncedIds);
     const queuedIds = new Set(state.retryQueue.map((item) => item.event.externalId));
-    const pending = unique.filter(
+    const pending = known.filter(
       (event) => !syncedIds.has(event.externalId) && !queuedIds.has(event.externalId),
     );
 
     log('info', 'EVENTS FOUND', {
       raw: result.events.length,
       valid: unique.length,
+      registered: known.length,
+      skippedUnregistered: unique.length - known.length,
       pending: pending.length,
       windowStart: start.toISOString(),
-      windowEnd: now.toISOString(),
+      windowEnd: end.toISOString(),
+      windowStartManila: formatManilaTime(start),
+      windowEndManila: formatManilaTime(end),
     });
 
     for (const event of pending) {
       if (await deliver(state, event)) synced += 1;
     }
-    if (result.complete) state.lastSeenAt = now.toISOString();
+    if (result.complete) state.lastSeenAt = end.toISOString();
     await saveState(state);
     log('info', 'SYNC SUCCESS COUNT', { synced, queued: state.retryQueue.length });
   } catch (error) {

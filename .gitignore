@@ -1,5 +1,7 @@
 .env
 dist
+build
+release
 .sync-state.json
 .sync-state.json.tmp
 

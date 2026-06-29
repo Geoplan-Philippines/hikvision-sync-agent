@@ -3,6 +3,7 @@ import { parseStringPromise } from 'xml2js';
 
 const EVENT_PATH = '/ISAPI/AccessControl/AcsEvent?format=json';
 const DEFAULT_TIMEOUT_MS = 8_000;
+const MAX_REQUESTS_PER_DIGEST_SESSION = 8;
 
 type LogLevel = 'info' | 'warn' | 'error';
 type LogDetails = Record<string, unknown>;
@@ -37,6 +38,8 @@ export class HikvisionClient {
   private readonly password = process.env.HIKVISION_PASS;
   private readonly timeoutMs = Number(process.env.HIKVISION_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
   private client: DigestClient | null = null;
+  private authenticationHalted = false;
+  private successfulSessionRequests = 0;
 
   private validateConfig(): void {
     const missing = [
@@ -57,6 +60,13 @@ export class HikvisionClient {
   }
 
   private getClient(): DigestClient {
+    if (this.successfulSessionRequests >= MAX_REQUESTS_PER_DIGEST_SESSION) {
+      this.client = null;
+      this.successfulSessionRequests = 0;
+      log('info', 'DIGEST SESSION RENEWED', {
+        reason: 'Proactive nonce renewal before device session exhaustion.',
+      });
+    }
     if (!this.client) {
       this.validateConfig();
       this.client = new DigestClient(this.username!, this.password!);
@@ -64,11 +74,14 @@ export class HikvisionClient {
     return this.client;
   }
 
-  private resetClient(): void {
-    this.client = null;
-  }
-
   async request(path: string, options: RequestInit = {}): Promise<unknown | null> {
+    if (this.authenticationHalted) {
+      log('warn', 'HIKVISION AUTHENTICATION HALTED', {
+        reason: 'A previous request returned 401; restart the agent to try again.',
+      });
+      return null;
+    }
+
     let url: string;
     try {
       url = new URL(path, `${this.baseUrl}/`).toString();
@@ -84,9 +97,15 @@ export class HikvisionClient {
     try {
       response = await this.fetchWithTimeout(url, options);
       if (response.status === 401) {
-        log('warn', 'DIGEST AUTH RETRY', { method, url, status: 401 });
-        this.resetClient();
-        response = await this.fetchWithTimeout(url, options);
+        await response.arrayBuffer().catch(() => undefined);
+        this.authenticationHalted = true;
+        log('error', 'HIKVISION AUTHENTICATION HALTED', {
+          method,
+          url,
+          status: 401,
+          reason: 'No retry was attempted to avoid device account lockout. Restart the agent to try again.',
+        });
+        return null;
       }
     } catch (error) {
       log('error', 'ERROR DETAILS', { stage: 'hikvision_request', url, ...getErrorDetails(error) });
@@ -115,6 +134,8 @@ export class HikvisionClient {
       });
       return null;
     }
+
+    this.successfulSessionRequests += 1;
 
     if (!text.trim()) {
       log('warn', 'EMPTY RESPONSE', { url, status: response.status });
@@ -163,8 +184,8 @@ export class HikvisionClient {
           searchID: query.searchId,
           searchResultPosition: query.position,
           maxResults: query.maxResults,
-          major: 0,
-          minor: 0,
+          major: 5,
+          minor: 38,
           startTime: query.startTime,
           endTime: query.endTime,
         },

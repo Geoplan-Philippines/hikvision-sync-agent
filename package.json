@@ -5,8 +5,11 @@
   "main": "dist/index.js",
   "exports": "./dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "bundle": "npm run build && esbuild dist/index.js --bundle --platform=node --format=cjs --target=node25 --external:node-fetch --outfile=build/agent.cjs",
+    "package:exe": "npm run bundle && node --experimental-sea-config sea-config.json && node scripts/build-exe.mjs",
     "prestart": "npm run build",
     "start": "node --enable-source-maps dist/index.js"
   },
@@ -26,6 +29,8 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/xml2js": "^0.4.14",
+    "esbuild": "^0.25.0",
+    "postject": "^1.0.0-alpha.6",
     "typescript": "^5.7.3"
   }
 }
