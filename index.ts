@@ -9,7 +9,7 @@ const projectDirectory = path.basename(moduleDirectory) === 'dist'
 
 dotenv.config({ path: path.join(projectDirectory, '.env'), quiet: true });
 
-const { default: sync } = await import('./sync.js');
+const { default: sync } = await import('./src/sync.js');
 
 const intervalMs = Math.max(1_000, Number(process.env.SYNC_INTERVAL_MS) || 10_000);
 let timer: NodeJS.Timeout | null = null;

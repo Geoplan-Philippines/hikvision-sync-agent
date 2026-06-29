@@ -13,6 +13,6 @@
     "declaration": true,
     "types": ["node"]
   },
-  "include": ["*.ts"],
+  "include": ["index.ts", "src/**/*.ts"],
   "exclude": ["dist", "node_modules"]
 }

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import axios from 'axios';
 import hikvision from './hikvision.js';
 
+
 const PAGE_SIZE = 30;
 const MAX_PAGES = 100;
 const MAX_SYNCED_IDS = 20_000;
@@ -14,9 +15,14 @@ const OVERLAP_MS = 5 * 60 * 1000;
 const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-const projectDirectory = path.basename(moduleDirectory) === 'dist'
-  ? path.dirname(moduleDirectory)
-  : moduleDirectory;
+const parentDirectory = path.dirname(moduleDirectory);
+const projectDirectory = path.basename(moduleDirectory) === 'src'
+  ? path.basename(parentDirectory) === 'dist'
+    ? path.dirname(parentDirectory)
+    : parentDirectory
+  : path.basename(moduleDirectory) === 'dist'
+    ? parentDirectory
+    : moduleDirectory;
 const statePath = path.resolve(projectDirectory, process.env.SYNC_STATE_FILE ?? '.sync-state.json');
 
 type LogLevel = 'info' | 'warn' | 'error';
