@@ -22,6 +22,7 @@ const EVENT_NAMES: Record<string, string> = {
   'BIOMETRIC TRIGGER RECEIVED': 'Biometric trigger received',
   'REALTIME WATCHDOG STARTED': 'Real-time recovery watchdog started',
   'VPS BATCH RESULT': 'VPS biometric batch processed',
+  'LOG SIZE LIMIT APPLIED': 'Agent log cleared at size limit',
   'ERROR DETAILS': 'Operation failed',
 };
 

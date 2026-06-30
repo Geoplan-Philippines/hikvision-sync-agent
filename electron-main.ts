@@ -38,7 +38,9 @@ const preloadPath = path.join(app.getAppPath(), 'preload.cjs');
 const logPath = path.join(appDirectory, 'agent.log');
 const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const REALTIME_WATCHDOG_MS = 20_000;
+const REALTIME_WATCHDOG_MS = 60_000;
+const MAX_AGENT_LOG_BYTES = 5 * 1024 * 1024;
+const LOG_MAINTENANCE_INTERVAL_MS = 10 * 60 * 1000;
 
 interface AgentStatus {
   message: string;
@@ -57,6 +59,8 @@ let tray: Tray | null = null;
 let syncTimer: NodeJS.Timeout | null = null;
 let dailyLifecycleTimer: NodeJS.Timeout | null = null;
 let realtimeWatchdogTimer: NodeJS.Timeout | null = null;
+let logMaintenanceTimer: NodeJS.Timeout | null = null;
+let logMaintenanceRunning = false;
 let syncInProgress = false;
 let currentConfig: AgentConfig | null = null;
 let logStream: WriteStream | null = null;
@@ -75,8 +79,50 @@ let status: AgentStatus = {
 let syncModule: Promise<typeof import('./src/sync.js')> | null = null;
 let alertStream: HikvisionAlertStream | null = null;
 
-function enableFileLogging(): void {
+async function enforceLogSizeLimit(): Promise<number> {
+  try {
+    const { size } = await fs.stat(logPath);
+    if (size <= MAX_AGENT_LOG_BYTES) return 0;
+    await fs.truncate(logPath, 0);
+    return size;
+  } catch (error) {
+    const code = typeof error === 'object' && error !== null && 'code' in error
+      ? error.code
+      : undefined;
+    if (code === 'ENOENT') return 0;
+    throw error;
+  }
+}
+
+async function maintainLogSize(): Promise<void> {
+  if (logMaintenanceRunning) return;
+  logMaintenanceRunning = true;
+  try {
+    const clearedBytes = await enforceLogSizeLimit();
+    if (clearedBytes > 0) {
+      log('warn', 'LOG SIZE LIMIT APPLIED', {
+        clearedBytes,
+        maxBytes: MAX_AGENT_LOG_BYTES,
+      });
+    }
+  } catch (error) {
+    log('error', 'ERROR DETAILS', {
+      stage: 'log_maintenance',
+      message: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    logMaintenanceRunning = false;
+  }
+}
+
+function startLogMaintenance(): void {
+  if (logMaintenanceTimer) return;
+  logMaintenanceTimer = setInterval(() => void maintainLogSize(), LOG_MAINTENANCE_INTERVAL_MS);
+}
+
+async function enableFileLogging(): Promise<void> {
   mkdirSync(appDirectory, { recursive: true });
+  const clearedBytes = await enforceLogSizeLimit();
   logStream = createWriteStream(logPath, { flags: 'a' });
   for (const level of ['log', 'warn', 'error'] as const) {
     const original = console[level].bind(console);
@@ -85,6 +131,12 @@ function enableFileLogging(): void {
       logStream?.write(`${values.map((value) =>
         typeof value === 'string' ? value : JSON.stringify(value)).join(' ')}\n`);
     };
+  }
+  if (clearedBytes > 0) {
+    log('warn', 'LOG SIZE LIMIT APPLIED', {
+      clearedBytes,
+      maxBytes: MAX_AGENT_LOG_BYTES,
+    });
   }
 }
 
@@ -444,7 +496,8 @@ function registerIpcHandlers(): void {
 
 async function initialize(): Promise<void> {
   dotenv.config({ path: path.join(app.getAppPath(), '.env'), quiet: true });
-  enableFileLogging();
+  await enableFileLogging();
+  startLogMaintenance();
   app.setAppUserModelId('com.geoplan.meedo.hikvision-sync-agent');
   registerIpcHandlers();
 
@@ -506,6 +559,7 @@ if (!hasSingleInstanceLock) {
     if (syncTimer) clearTimeout(syncTimer);
     if (dailyLifecycleTimer) clearTimeout(dailyLifecycleTimer);
     stopRealtimeWatchdog();
+    if (logMaintenanceTimer) clearInterval(logMaintenanceTimer);
     alertStream?.dispose();
     logStream?.end();
   });
