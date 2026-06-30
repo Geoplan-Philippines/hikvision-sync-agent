@@ -20,6 +20,8 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
     label { display: block; font-size: 12px; font-weight: 600; color: #475467; margin-bottom: 6px; }
     input { width: 100%; height: 38px; border: 1px solid #cbd3df; border-radius: 7px; padding: 0 10px; font: inherit; }
     input:focus { outline: 2px solid #a9c8ff; border-color: #3478df; }
+    .check label { display: flex; align-items: center; gap: 8px; margin: 0; }
+    .check input { width: auto; height: auto; }
     .actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 20px; }
     button { border: 1px solid #c4ccda; border-radius: 7px; padding: 9px 14px; background: white; color: #1d2939; font-weight: 600; cursor: pointer; }
     button.primary { border-color: #1769d2; background: #1769d2; color: white; }
@@ -66,7 +68,7 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
         <div class="full"><label for="password">Hikvision password</label><input id="password" type="password" required autocomplete="new-password"></div>
         <div class="full"><label for="vps">VPS API base URL</label><input id="vps" type="url" required></div>
         <div><label for="interval">Sync interval (minutes)</label><input id="interval" type="number" min="1" max="1440" step="1" required></div>
-        <div></div>
+        <div class='full check'><label><input id='realtime' type='checkbox'> Enable real-time biometric trigger (scheduled recovery remains active)</label></div>
         <div><label for="start">Daily start (Asia/Manila)</label><input id="start" type="time" required></div>
         <div><label for="end">Daily end (Asia/Manila)</label><input id="end" type="time" required></div>
       </div>
@@ -100,7 +102,7 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
       host: document.getElementById('host'), username: document.getElementById('username'),
       password: document.getElementById('password'), vps: document.getElementById('vps'),
       interval: document.getElementById('interval'), start: document.getElementById('start'),
-      end: document.getElementById('end')
+      end: document.getElementById('end'), realtime: document.getElementById('realtime')
     };
     const message = document.getElementById('message');
     const status = document.getElementById('status');
@@ -111,7 +113,15 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
     function showMessage(text, error) { message.textContent = text; message.className = error ? 'error' : ''; }
     async function refreshStatus() {
       const value = await api.getStatus();
-      status.textContent = value.message + (value.lastRun ? ' Last run: ' + new Date(value.lastRun).toLocaleString() + '.' : '');
+      const details = [
+        'Listener: ' + String(value.listenerState || 'stopped').replaceAll('_', ' '),
+        value.pendingSync ? 'follow-up sync pending' : '',
+        value.lastRealtimeEvent ? 'last event ' + new Date(value.lastRealtimeEvent).toLocaleString() : '',
+        value.lastEventTriggeredSync ? 'last event sync ' + new Date(value.lastEventTriggeredSync).toLocaleString() : '',
+        value.reconnectAttempt ? 'reconnect attempt ' + value.reconnectAttempt : '',
+        value.lastListenerError ? 'listener error: ' + value.lastListenerError : ''
+      ].filter(Boolean).join(' · ');
+      status.textContent = value.message + (value.lastRun ? ' Last run: ' + new Date(value.lastRun).toLocaleString() + '.' : '') + (details ? ' ' + details + '.' : '');
     }
     async function load() {
       const config = await api.getConfig();
@@ -122,6 +132,7 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
       fields.interval.value = config.SYNC_INTERVAL_MINUTES || 30;
       fields.start.value = config.SYNC_START_TIME || '09:00';
       fields.end.value = config.SYNC_END_TIME || '20:00';
+      fields.realtime.checked = config.REALTIME_ENABLED !== false;
       await refreshStatus();
     }
     function visibleLogs() {
@@ -175,7 +186,8 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
         HIKVISION_HOST: fields.host.value, HIKVISION_USER: fields.username.value,
         HIKVISION_PASS: fields.password.value, VPS_URL: fields.vps.value,
         SYNC_INTERVAL_MINUTES: Number(fields.interval.value),
-        SYNC_START_TIME: fields.start.value, SYNC_END_TIME: fields.end.value
+        SYNC_START_TIME: fields.start.value, SYNC_END_TIME: fields.end.value,
+        REALTIME_ENABLED: fields.realtime.checked
       });
       showMessage(result.message, !result.ok);
     });

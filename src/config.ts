@@ -10,6 +10,7 @@ export interface AgentConfig {
   SYNC_INTERVAL_MINUTES: number;
   SYNC_START_TIME: string;
   SYNC_END_TIME: string;
+  REALTIME_ENABLED: boolean;
 }
 
 export const DEFAULT_CONFIG: AgentConfig = {
@@ -20,6 +21,7 @@ export const DEFAULT_CONFIG: AgentConfig = {
   SYNC_INTERVAL_MINUTES: 30,
   SYNC_START_TIME: '09:00',
   SYNC_END_TIME: '20:00',
+  REALTIME_ENABLED: true,
 };
 
 export const appDirectory = path.join(
@@ -53,6 +55,10 @@ export function validateConfig(value: unknown): AgentConfig {
   const intervalMinutes = parseInterval(value.SYNC_INTERVAL_MINUTES);
   const startTime = String(value.SYNC_START_TIME ?? '').trim();
   const endTime = String(value.SYNC_END_TIME ?? DEFAULT_CONFIG.SYNC_END_TIME).trim();
+  const realtimeValue = value.REALTIME_ENABLED ?? DEFAULT_CONFIG.REALTIME_ENABLED;
+  const realtimeEnabled = typeof realtimeValue === 'boolean'
+    ? realtimeValue
+    : !['false', '0', 'off', 'no'].includes(String(realtimeValue).trim().toLowerCase());
 
   if (!host) throw new Error('HIKVISION_HOST is required.');
   if (!username) throw new Error('HIKVISION_USER is required.');
@@ -79,6 +85,7 @@ export function validateConfig(value: unknown): AgentConfig {
     SYNC_INTERVAL_MINUTES: intervalMinutes,
     SYNC_START_TIME: startTime,
     SYNC_END_TIME: endTime,
+    REALTIME_ENABLED: realtimeEnabled,
   };
 }
 
@@ -95,6 +102,7 @@ export function configFromEnvironment(): AgentConfig {
       process.env.SYNC_INTERVAL_MINUTES ?? process.env.SYNC_TIME ?? legacyInterval ?? 30,
     SYNC_START_TIME: process.env.SYNC_START_TIME ?? '09:00',
     SYNC_END_TIME: process.env.SYNC_END_TIME ?? '20:00',
+    REALTIME_ENABLED: process.env.REALTIME_ENABLED ?? true,
   });
 }
 
@@ -123,5 +131,6 @@ export function applyConfig(config: AgentConfig): void {
   process.env.SYNC_INTERVAL_MINUTES = String(config.SYNC_INTERVAL_MINUTES);
   process.env.SYNC_START_TIME = config.SYNC_START_TIME;
   process.env.SYNC_END_TIME = config.SYNC_END_TIME;
+  process.env.REALTIME_ENABLED = String(config.REALTIME_ENABLED);
   process.env.SYNC_STATE_FILE = statePath;
 }

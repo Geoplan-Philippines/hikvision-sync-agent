@@ -25,6 +25,8 @@ export interface BiometricEvent {
   timestamp: string;
 }
 
+export type SyncSource = 'scheduled' | 'morning_catch_up' | 'manual' | 'biometric_trigger';
+
 interface RetryItem {
   event: BiometricEvent;
   attempts: number;
@@ -317,7 +319,6 @@ async function deliver(state: SyncState, event: BiometricEvent, previousAttempts
       externalId: event.externalId,
       status: response?.status,
       message: error instanceof Error ? error.message : String(error),
-      response: typeof response?.data === 'string' ? response.data.slice(0, 300) : response?.data,
     });
     enqueueRetry(state, event, previousAttempts);
     return false;
@@ -333,7 +334,7 @@ async function processRetries(state: SyncState): Promise<number> {
   return synced;
 }
 
-export default async function sync(): Promise<void> {
+export default async function sync(source: SyncSource = 'scheduled'): Promise<void> {
   if (running) {
     log('warn', 'SYNC SKIPPED', { reason: 'previous_cycle_running' });
     return;
@@ -341,6 +342,7 @@ export default async function sync(): Promise<void> {
   running = true;
 
   try {
+    log('info', 'SYNC CYCLE STARTED', { source });
     const now = new Date();
     const dailyWindow = dailySyncWindow(now);
     if (now < dailyWindow.start) {

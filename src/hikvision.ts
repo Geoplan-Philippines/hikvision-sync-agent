@@ -1,5 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { parseStringPromise } from 'xml2js';
+import {
+  haltHikvisionAuthentication,
+  isHikvisionAuthenticationHalted,
+} from './hikvision-auth.js';
 import { writeLog as log } from './logger.js';
 
 const EVENT_PATH = '/ISAPI/AccessControl/AcsEvent?format=json';
@@ -97,14 +101,22 @@ export function buildDigestAuthorization(input: DigestAuthorizationInput): strin
 }
 
 export class HikvisionClient {
-  private readonly host = process.env.HIKVISION_HOST;
-  private readonly username = process.env.HIKVISION_USER;
-  private readonly password = process.env.HIKVISION_PASS;
   private readonly timeoutMs = Number(process.env.HIKVISION_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
-  private authenticationHalted = false;
   private challenge: DigestChallenge | null = null;
   private nonceCount = 0;
   private successfulSessionRequests = 0;
+
+  private get host(): string | undefined {
+    return process.env.HIKVISION_HOST;
+  }
+
+  private get username(): string | undefined {
+    return process.env.HIKVISION_USER;
+  }
+
+  private get password(): string | undefined {
+    return process.env.HIKVISION_PASS;
+  }
 
   private validateConfig(): void {
     const missing = [
@@ -122,7 +134,7 @@ export class HikvisionClient {
   }
 
   beginEventSearch(): boolean {
-    if (this.authenticationHalted) return false;
+    if (isHikvisionAuthenticationHalted()) return false;
     this.resetDigestSession();
     log('info', 'DIGEST SESSION STARTED', {
       reason: 'Nonce counter reset for a new Hikvision event-search cycle.',
@@ -145,7 +157,7 @@ export class HikvisionClient {
   }
 
   async request(requestPath: string, options: RequestInit = {}): Promise<unknown | null> {
-    if (this.authenticationHalted) {
+    if (isHikvisionAuthenticationHalted()) {
       log('warn', 'HIKVISION AUTHENTICATION HALTED', {
         reason: 'A previous authenticated request returned 401; restart the agent to try again.',
       });
@@ -192,7 +204,9 @@ export class HikvisionClient {
 
     if (response.status === 401) {
       await response.arrayBuffer().catch(() => undefined);
-      this.authenticationHalted = true;
+      haltHikvisionAuthentication(
+        'An authenticated Hikvision request returned 401; restart or save configuration to retry.',
+      );
       log('error', 'HIKVISION AUTHENTICATION HALTED', {
         method,
         url,
@@ -210,13 +224,14 @@ export class HikvisionClient {
       return null;
     }
 
-    log('info', 'RESPONSE PREVIEW', {
+    log('info', 'HIKVISION RESPONSE RECEIVED', {
       status: response.status,
-      preview: text.slice(0, 300).replace(/\s+/g, ' '),
+      contentType: response.headers.get('content-type') ?? 'unknown',
+      bytes: Buffer.byteLength(text),
     });
     if (!response.ok) {
       log('error', 'ERROR DETAILS', {
-        stage: 'hikvision_http', url, status: response.status, body: text.slice(0, 300),
+        stage: 'hikvision_http', url, status: response.status,
       });
       return null;
     }

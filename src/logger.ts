@@ -4,15 +4,22 @@ export type LogDetails = Record<string, unknown>;
 const EVENT_NAMES: Record<string, string> = {
   'REQUEST URL': 'Requesting Hikvision events',
   'RESPONSE PREVIEW': 'Hikvision response received',
+  'HIKVISION RESPONSE RECEIVED': 'Hikvision response received',
   'DIGEST SESSION STARTED': 'Authentication session started',
   'DIGEST SESSION RENEWED': 'Authentication session renewed safely',
   'DIGEST CHALLENGE ACCEPTED': 'Digest authentication challenge accepted',
   'REGISTERED BIOMETRIC IDS': 'Registered biometric IDs loaded',
   'EVENTS FOUND': 'Attendance events scanned',
   'SYNC SUCCESS COUNT': 'Sync cycle completed',
+  'SYNC CYCLE STARTED': 'Sync cycle started',
   'SYNC WINDOW NOT OPEN': 'Sync paused before daily start',
   'SYNC WINDOW CLOSED': 'Sync paused after daily end',
   'HIKVISION AUTHENTICATION HALTED': 'Hikvision authentication stopped for safety',
+  'REALTIME LISTENER CONNECTED': 'Real-time listener connected',
+  'REALTIME LISTENER RECONNECTING': 'Real-time listener reconnecting',
+  'REALTIME LISTENER DISABLED': 'Real-time listener disabled',
+  'REALTIME DIGEST CHALLENGE ACCEPTED': 'Real-time authentication challenge accepted',
+  'BIOMETRIC TRIGGER RECEIVED': 'Biometric trigger received',
   'ERROR DETAILS': 'Operation failed',
 };
 

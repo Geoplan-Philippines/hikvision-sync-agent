@@ -23,7 +23,15 @@ import {
   type AgentConfig,
 } from './src/config.js';
 import { CONFIG_WINDOW_HTML } from './src/window-content.js';
+import {
+  HikvisionAlertStream,
+  type ListenerState,
+} from './src/alert-stream.js';
 import { writeLog as log } from './src/logger.js';
+import {
+  SingleFlightSyncCoordinator,
+  type SyncReason,
+} from './src/sync-coordinator.js';
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const preloadPath = path.join(app.getAppPath(), 'preload.cjs');
@@ -35,17 +43,35 @@ interface AgentStatus {
   message: string;
   lastRun: string | null;
   running: boolean;
+  listenerState: ListenerState;
+  lastRealtimeEvent: string | null;
+  lastEventTriggeredSync: string | null;
+  pendingSync: boolean;
+  reconnectAttempt: number;
+  lastListenerError: string | null;
 }
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let syncTimer: NodeJS.Timeout | null = null;
+let dailyLifecycleTimer: NodeJS.Timeout | null = null;
 let syncInProgress = false;
 let currentConfig: AgentConfig | null = null;
 let logStream: WriteStream | null = null;
 let forceQuit = false;
-let status: AgentStatus = { message: 'Configuration required.', lastRun: null, running: false };
+let status: AgentStatus = {
+  message: 'Configuration required.',
+  lastRun: null,
+  running: false,
+  listenerState: 'stopped',
+  lastRealtimeEvent: null,
+  lastEventTriggeredSync: null,
+  pendingSync: false,
+  reconnectAttempt: 0,
+  lastListenerError: null,
+};
 let syncModule: Promise<typeof import('./src/sync.js')> | null = null;
+let alertStream: HikvisionAlertStream | null = null;
 
 function enableFileLogging(): void {
   mkdirSync(appDirectory, { recursive: true });
@@ -74,7 +100,7 @@ function updateTrayMenu(): void {
     { label: status.message, enabled: false },
     { type: 'separator' },
     { label: 'Open settings', click: () => showWindow() },
-    { label: 'Sync now', enabled: Boolean(currentConfig) && !syncInProgress, click: () => void runSyncCycle() },
+    { label: 'Sync now', enabled: Boolean(currentConfig) && !syncInProgress, click: () => void requestSync('manual') },
     { label: 'View logs', click: () => openLogViewer() },
     { type: 'separator' },
     { label: 'Uninstall permanently…', click: () => void launchUninstaller() },
@@ -153,6 +179,9 @@ function environmentDefaults(): AgentConfig {
     SYNC_INTERVAL_MINUTES: Number(process.env.SYNC_INTERVAL_MINUTES) || DEFAULT_CONFIG.SYNC_INTERVAL_MINUTES,
     SYNC_START_TIME: process.env.SYNC_START_TIME ?? DEFAULT_CONFIG.SYNC_START_TIME,
     SYNC_END_TIME: process.env.SYNC_END_TIME ?? DEFAULT_CONFIG.SYNC_END_TIME,
+    REALTIME_ENABLED: process.env.REALTIME_ENABLED === undefined
+      ? DEFAULT_CONFIG.REALTIME_ENABLED
+      : !['false', '0', 'off', 'no'].includes(process.env.REALTIME_ENABLED.toLowerCase()),
   };
 }
 
@@ -167,27 +196,29 @@ function configuredWindow(now: Date, config: AgentConfig): { start: Date; end: D
   return { start: instant(config.SYNC_START_TIME), end: instant(config.SYNC_END_TIME) };
 }
 
-function scheduleNextSync(): void {
+function scheduleNextIntervalSync(): void {
   if (syncTimer) clearTimeout(syncTimer);
   if (!currentConfig || forceQuit) return;
   const now = new Date();
   const window = configuredWindow(now, currentConfig);
   const intervalMs = currentConfig.SYNC_INTERVAL_MINUTES * 60_000;
-  let delayMs: number;
+  let nextRun: Date;
   if (now < window.start) {
-    delayMs = window.start.getTime() - now.getTime();
+    nextRun = new Date(window.start.getTime() + intervalMs);
   } else if (now >= window.end) {
-    delayMs = window.start.getTime() + DAY_MS - now.getTime();
+    nextRun = new Date(window.start.getTime() + DAY_MS + intervalMs);
   } else {
-    delayMs = Math.min(intervalMs, window.end.getTime() - now.getTime());
+    nextRun = new Date(now.getTime() + intervalMs);
+    if (nextRun >= window.end) nextRun = new Date(window.start.getTime() + DAY_MS + intervalMs);
   }
-  syncTimer = setTimeout(() => void runSyncCycle(), Math.max(1_000, delayMs));
+  syncTimer = setTimeout(() => {
+    scheduleNextIntervalSync();
+    void requestSync('scheduled');
+  }, Math.max(1_000, nextRun.getTime() - now.getTime()));
 }
 
-async function runSyncCycle(): Promise<'completed' | 'paused' | 'busy' | 'unconfigured'> {
-  if (!currentConfig) return 'unconfigured';
-  if (syncInProgress) return 'busy';
-  if (syncTimer) clearTimeout(syncTimer);
+async function executeSyncCycle(reason: SyncReason): Promise<void> {
+  if (!currentConfig) return;
   try {
     const module = await (syncModule ??= import('./src/sync.js'));
     const now = new Date();
@@ -197,23 +228,86 @@ async function runSyncCycle(): Promise<'completed' | 'paused' | 'busy' | 'unconf
         `Paused — daily window is ${currentConfig.SYNC_START_TIME}–${currentConfig.SYNC_END_TIME} Asia/Manila.`,
         { running: false },
       );
-      return 'paused';
+      return;
     }
 
-    syncInProgress = true;
     setStatus('Synchronizing…', { running: true });
-    await module.default();
-    setStatus('Running in system tray.', { running: false, lastRun: new Date().toISOString() });
-    return 'completed';
+    await module.default(reason);
+    const completedAt = new Date().toISOString();
+    setStatus('Running in system tray.', {
+      running: false,
+      lastRun: completedAt,
+      lastEventTriggeredSync: reason === 'biometric_trigger'
+        ? completedAt
+        : status.lastEventTriggeredSync,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    log('error', 'SYNC CYCLE FAILED', { message });
+    log('error', 'SYNC CYCLE FAILED', { source: reason, message });
     setStatus(`Sync failed: ${message}`, { running: false, lastRun: new Date().toISOString() });
-    return 'completed';
-  } finally {
-    syncInProgress = false;
-    scheduleNextSync();
   }
+}
+
+const syncCoordinator = new SingleFlightSyncCoordinator(executeSyncCycle, (coordinatorStatus) => {
+  syncInProgress = coordinatorStatus.running;
+  setStatus(status.message, {
+    running: coordinatorStatus.running,
+    pendingSync: coordinatorStatus.pending,
+  });
+});
+
+function requestSync(reason: SyncReason): Promise<void> {
+  return syncCoordinator.request(reason);
+}
+
+function scheduleDailyLifecycle(): void {
+  if (dailyLifecycleTimer) clearTimeout(dailyLifecycleTimer);
+  if (!currentConfig || forceQuit) return;
+  const now = new Date();
+  const window = configuredWindow(now, currentConfig);
+  if (now >= window.start && now < window.end) {
+    dailyLifecycleTimer = setTimeout(() => {
+      alertStream?.stop();
+      scheduleDailyLifecycle();
+    }, Math.max(1_000, window.end.getTime() - now.getTime()));
+    return;
+  }
+
+  alertStream?.stop();
+  const nextStart = now < window.start
+    ? window.start
+    : new Date(window.start.getTime() + DAY_MS);
+  dailyLifecycleTimer = setTimeout(() => {
+    void enterDailyWindow();
+  }, Math.max(1_000, nextStart.getTime() - now.getTime()));
+}
+
+async function enterDailyWindow(): Promise<void> {
+  await requestSync('morning_catch_up');
+  if (!currentConfig || forceQuit) return;
+  const now = new Date();
+  const window = configuredWindow(now, currentConfig);
+  if (now >= window.start && now < window.end && currentConfig.REALTIME_ENABLED) {
+    alertStream?.start();
+  }
+  scheduleDailyLifecycle();
+}
+
+function initializeAlertStream(): void {
+  if (!currentConfig || !currentConfig.REALTIME_ENABLED) {
+    setStatus(status.message, { listenerState: 'stopped' });
+    return;
+  }
+  alertStream = new HikvisionAlertStream({
+    host: currentConfig.HIKVISION_HOST,
+    username: currentConfig.HIKVISION_USER,
+    password: currentConfig.HIKVISION_PASS,
+    onTrigger: () => {
+      setStatus(status.message, { lastEventTriggeredSync: new Date().toISOString() });
+      return requestSync('biometric_trigger');
+    },
+    onStatusChange: (listenerStatus) => setStatus(status.message, listenerStatus),
+  });
 }
 
 async function readRecentLogs(): Promise<unknown[]> {
@@ -309,11 +403,13 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle('sync:now', async () => {
     if (!currentConfig) return { ok: false, message: 'Save configuration first.' };
-    if (syncInProgress) return { ok: false, message: 'A sync cycle is already running.' };
-    const outcome = await runSyncCycle();
-    return outcome === 'paused'
-      ? { ok: false, message: 'Outside the configured daily window. No sync request was sent.' }
-      : { ok: true, message: 'Sync cycle completed.' };
+    const now = new Date();
+    const window = configuredWindow(now, currentConfig);
+    if (now < window.start || now >= window.end) {
+      return { ok: false, message: 'Outside the configured daily window. No sync request was sent.' };
+    }
+    await requestSync('manual');
+    return { ok: true, message: 'Sync cycle completed.' };
   });
   ipcMain.handle('config:save', async (_event, value: unknown) => {
     try {
@@ -369,7 +465,12 @@ async function initialize(): Promise<void> {
     applyConfig(currentConfig);
     configureAutoStart(true);
     setStatus('Running in system tray.');
-    void runSyncCycle();
+    initializeAlertStream();
+    const now = new Date();
+    const window = configuredWindow(now, currentConfig);
+    if (now >= window.start && now < window.end) await enterDailyWindow();
+    else scheduleDailyLifecycle();
+    scheduleNextIntervalSync();
   } else {
     setStatus('Configuration required.');
   }
@@ -386,6 +487,8 @@ if (!hasSingleInstanceLock) {
   app.on('before-quit', () => {
     forceQuit = true;
     if (syncTimer) clearTimeout(syncTimer);
+    if (dailyLifecycleTimer) clearTimeout(dailyLifecycleTimer);
+    alertStream?.dispose();
     logStream?.end();
   });
   void app.whenReady().then(initialize).catch((error: unknown) => {
