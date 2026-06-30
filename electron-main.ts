@@ -38,6 +38,7 @@ const preloadPath = path.join(app.getAppPath(), 'preload.cjs');
 const logPath = path.join(appDirectory, 'agent.log');
 const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const REALTIME_WATCHDOG_MS = 20_000;
 
 interface AgentStatus {
   message: string;
@@ -55,6 +56,7 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let syncTimer: NodeJS.Timeout | null = null;
 let dailyLifecycleTimer: NodeJS.Timeout | null = null;
+let realtimeWatchdogTimer: NodeJS.Timeout | null = null;
 let syncInProgress = false;
 let currentConfig: AgentConfig | null = null;
 let logStream: WriteStream | null = null;
@@ -223,7 +225,7 @@ async function executeSyncCycle(reason: SyncReason): Promise<void> {
     const module = await (syncModule ??= import('./src/sync.js'));
     const now = new Date();
     const dailyWindow = module.dailySyncWindow(now);
-    if (now < dailyWindow.start || now >= dailyWindow.end) {
+    if (!module.syncAllowedAt(reason, now, dailyWindow)) {
       setStatus(
         `Paused — daily window is ${currentConfig.SYNC_START_TIME}–${currentConfig.SYNC_END_TIME} Asia/Manila.`,
         { running: false },
@@ -260,6 +262,19 @@ function requestSync(reason: SyncReason): Promise<void> {
   return syncCoordinator.request(reason);
 }
 
+function stopRealtimeWatchdog(): void {
+  if (realtimeWatchdogTimer) clearInterval(realtimeWatchdogTimer);
+  realtimeWatchdogTimer = null;
+}
+
+function startRealtimeWatchdog(): void {
+  if (realtimeWatchdogTimer || forceQuit || !currentConfig?.REALTIME_ENABLED) return;
+  realtimeWatchdogTimer = setInterval(() => {
+    void requestSync('watchdog');
+  }, REALTIME_WATCHDOG_MS);
+  log('info', 'REALTIME WATCHDOG STARTED', { intervalMs: REALTIME_WATCHDOG_MS });
+}
+
 function scheduleDailyLifecycle(): void {
   if (dailyLifecycleTimer) clearTimeout(dailyLifecycleTimer);
   if (!currentConfig || forceQuit) return;
@@ -267,13 +282,11 @@ function scheduleDailyLifecycle(): void {
   const window = configuredWindow(now, currentConfig);
   if (now >= window.start && now < window.end) {
     dailyLifecycleTimer = setTimeout(() => {
-      alertStream?.stop();
       scheduleDailyLifecycle();
     }, Math.max(1_000, window.end.getTime() - now.getTime()));
     return;
   }
 
-  alertStream?.stop();
   const nextStart = now < window.start
     ? window.start
     : new Date(window.start.getTime() + DAY_MS);
@@ -285,11 +298,6 @@ function scheduleDailyLifecycle(): void {
 async function enterDailyWindow(): Promise<void> {
   await requestSync('morning_catch_up');
   if (!currentConfig || forceQuit) return;
-  const now = new Date();
-  const window = configuredWindow(now, currentConfig);
-  if (now >= window.start && now < window.end && currentConfig.REALTIME_ENABLED) {
-    alertStream?.start();
-  }
   scheduleDailyLifecycle();
 }
 
@@ -306,7 +314,11 @@ function initializeAlertStream(): void {
       setStatus(status.message, { lastEventTriggeredSync: new Date().toISOString() });
       return requestSync('biometric_trigger');
     },
-    onStatusChange: (listenerStatus) => setStatus(status.message, listenerStatus),
+    onStatusChange: (listenerStatus) => {
+      if (listenerStatus.listenerState === 'connected') startRealtimeWatchdog();
+      else stopRealtimeWatchdog();
+      setStatus(status.message, listenerStatus);
+    },
   });
 }
 
@@ -468,8 +480,13 @@ async function initialize(): Promise<void> {
     initializeAlertStream();
     const now = new Date();
     const window = configuredWindow(now, currentConfig);
-    if (now >= window.start && now < window.end) await enterDailyWindow();
-    else scheduleDailyLifecycle();
+    if (now >= window.start && now < window.end) {
+      await enterDailyWindow();
+      alertStream?.start();
+    } else {
+      alertStream?.start();
+      scheduleDailyLifecycle();
+    }
     scheduleNextIntervalSync();
   } else {
     setStatus('Configuration required.');
@@ -488,6 +505,7 @@ if (!hasSingleInstanceLock) {
     forceQuit = true;
     if (syncTimer) clearTimeout(syncTimer);
     if (dailyLifecycleTimer) clearTimeout(dailyLifecycleTimer);
+    stopRealtimeWatchdog();
     alertStream?.dispose();
     logStream?.end();
   });

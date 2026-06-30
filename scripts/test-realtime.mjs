@@ -4,10 +4,23 @@ import {
   isRelevantAccessEvent,
 } from '../dist/src/alert-stream.js';
 import { SingleFlightSyncCoordinator } from '../dist/src/sync-coordinator.js';
+import { parseBatchIngestResponse } from '../dist/src/sync.js';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
+
+const batchResponse = parseBatchIngestResponse({ data: {
+  ingested: 1,
+  duplicates: 1,
+  unknown: 1,
+  results: [
+    { externalId: 'one', status: 'ingested' },
+    { externalId: 'two', status: 'duplicate' },
+    { externalId: 'three', status: 'unknown_biometrics_id' },
+  ],
+} });
+assert(batchResponse.results.length === 3, 'Wrapped VPS batch response was not parsed.');
 
 const accessJson = JSON.stringify({
   EventNotificationAlert: {
@@ -18,6 +31,13 @@ const accessJson = JSON.stringify({
 const heartbeatJson = JSON.stringify({ EventNotificationAlert: { eventType: 'heartbeat' } });
 const unrelatedJson = JSON.stringify({
   EventNotificationAlert: { eventType: 'diskFull', majorEventType: 3 },
+});
+const firmwareVariantJson = JSON.stringify({
+  EventNotificationAlert: {
+    eventType: 'AccessControllerEvent',
+    majorEventType: 3,
+    AccessControllerEvent: { employeeNoString: '42' },
+  },
 });
 const accessXml = '<EventNotificationAlert><eventType>AccessControllerEvent</eventType>' +
   '<AccessControllerEvent><employeeNoString>42</employeeNoString></AccessControllerEvent>' +
@@ -45,8 +65,13 @@ assert(multipartMessages.length === 2, 'Split multipart data did not produce two
 
 const heartbeat = new IncrementalAlertParser().push(heartbeatJson)[0];
 const unrelated = new IncrementalAlertParser().push(unrelatedJson)[0];
+const firmwareVariant = new IncrementalAlertParser().push(firmwareVariantJson)[0];
 assert(!isRelevantAccessEvent(heartbeat), 'Heartbeat incorrectly triggered a sync.');
 assert(!isRelevantAccessEvent(unrelated), 'Unrelated alarm incorrectly triggered a sync.');
+assert(
+  isRelevantAccessEvent(firmwareVariant),
+  'Firmware access event with unexpected major code did not trigger a sync.',
+);
 
 let releaseFirst;
 const firstGate = new Promise((resolve) => { releaseFirst = resolve; });

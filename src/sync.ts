@@ -10,9 +10,13 @@ const PAGE_SIZE = 30;
 const MAX_PAGES = 100;
 const MAX_SYNCED_IDS = 20_000;
 const MAX_RETRY_ATTEMPTS = 10;
+const MAX_VPS_BATCH_SIZE = 100;
 const RETRY_BASE_MS = 10_000;
 const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const REALTIME_LOOKBACK_MS = 5 * 60 * 1000;
+const REALTIME_CURSOR_OVERLAP_MS = 10 * 1000;
+const REGISTERED_IDS_CACHE_MS = 60 * 1000;
 const STATE_VERSION = 2;
 
 const statePath = path.resolve(process.env.SYNC_STATE_FILE ?? path.join(process.cwd(), '.sync-state.json'));
@@ -25,7 +29,12 @@ export interface BiometricEvent {
   timestamp: string;
 }
 
-export type SyncSource = 'scheduled' | 'morning_catch_up' | 'manual' | 'biometric_trigger';
+export type SyncSource =
+  | 'scheduled'
+  | 'morning_catch_up'
+  | 'manual'
+  | 'watchdog'
+  | 'biometric_trigger';
 
 interface RetryItem {
   event: BiometricEvent;
@@ -45,7 +54,27 @@ interface FetchResult {
   complete: boolean;
 }
 
+interface RegisteredIdsCache {
+  ids: Set<string>;
+  expiresAt: number;
+}
+
+type BatchIngestStatus = 'ingested' | 'duplicate' | 'unknown_biometrics_id';
+
+interface BatchIngestEventResult {
+  externalId: string;
+  status: BatchIngestStatus;
+}
+
+interface BatchIngestResponse {
+  ingested: number;
+  duplicates: number;
+  unknown: number;
+  results: BatchIngestEventResult[];
+}
+
 let running = false;
+let registeredIdsCache: RegisteredIdsCache | null = null;
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -154,10 +183,33 @@ export function dailySyncWindow(now: Date): { start: Date; end: Date } {
   };
 }
 
+export function syncAllowedAt(
+  source: SyncSource,
+  now: Date,
+  dailyWindow: { start: Date; end: Date },
+): boolean {
+  return source === 'biometric_trigger' ||
+    source === 'watchdog' ||
+    (now >= dailyWindow.start && now < dailyWindow.end);
+}
+
 export function eventWindowStart(
   lastSeenAt: string | null,
   dailyWindow: { start: Date; end: Date },
-): { start: Date; mode: 'morning_catch_up' | 'interval_rescan' } {
+  source: SyncSource = 'scheduled',
+  now: Date = new Date(),
+): { start: Date; mode: 'morning_catch_up' | 'interval_rescan' | 'realtime_cursor' } {
+  if (source === 'biometric_trigger' || source === 'watchdog') {
+    const floor = now.getTime() - REALTIME_LOOKBACK_MS;
+    const lastSeen = lastSeenAt ? new Date(lastSeenAt) : null;
+    const cursor = lastSeen && !Number.isNaN(lastSeen.getTime())
+      ? lastSeen.getTime() - REALTIME_CURSOR_OVERLAP_MS
+      : floor;
+    return {
+      start: new Date(Math.max(floor, cursor)),
+      mode: 'realtime_cursor',
+    };
+  }
   const lastSeen = lastSeenAt ? new Date(lastSeenAt) : null;
   const needsMorningCatchUp = !lastSeen ||
     Number.isNaN(lastSeen.getTime()) ||
@@ -231,6 +283,16 @@ function apiUrl(path: string): string {
 }
 
 async function fetchRegisteredBiometricIds(): Promise<Set<string>> {
+  const now = Date.now();
+  if (registeredIdsCache && registeredIdsCache.expiresAt > now) {
+    log('info', 'REGISTERED BIOMETRIC IDS', {
+      count: registeredIdsCache.ids.size,
+      source: 'cache',
+      expiresInMs: registeredIdsCache.expiresAt - now,
+    });
+    return registeredIdsCache.ids;
+  }
+
   const response = await axios.get(apiUrl('biometrics/ids'), {
     timeout: Number(process.env.VPS_TIMEOUT_MS) || 8_000,
   });
@@ -243,15 +305,42 @@ async function fetchRegisteredBiometricIds(): Promise<Set<string>> {
   const registeredIds = new Set(
     ids.filter((id): id is string => typeof id === 'string' && id.trim().length > 0),
   );
-  log('info', 'REGISTERED BIOMETRIC IDS', { count: registeredIds.size });
+  registeredIdsCache = { ids: registeredIds, expiresAt: now + REGISTERED_IDS_CACHE_MS };
+  log('info', 'REGISTERED BIOMETRIC IDS', {
+    count: registeredIds.size,
+    source: 'vps',
+    cacheTtlMs: REGISTERED_IDS_CACHE_MS,
+  });
   return registeredIds;
 }
 
-async function postEvent(event: BiometricEvent): Promise<void> {
-  await axios.post(apiUrl('event'), event, {
-    timeout: Number(process.env.VPS_TIMEOUT_MS) || 8_000,
-    validateStatus: (status) => (status >= 200 && status < 300) || status === 409,
+export function parseBatchIngestResponse(value: unknown): BatchIngestResponse {
+  const payload = isRecord(value) && isRecord(value.data) ? value.data : value;
+  if (!isRecord(payload) || !Array.isArray(payload.results)) {
+    throw new Error('VPS biometric batch response is malformed.');
+  }
+  const results = payload.results.filter((result): result is BatchIngestEventResult => {
+    if (!isRecord(result) || typeof result.externalId !== 'string') return false;
+    return result.status === 'ingested' ||
+      result.status === 'duplicate' ||
+      result.status === 'unknown_biometrics_id';
   });
+  if (results.length !== payload.results.length) {
+    throw new Error('VPS biometric batch results are malformed.');
+  }
+  return {
+    ingested: Number(payload.ingested) || 0,
+    duplicates: Number(payload.duplicates) || 0,
+    unknown: Number(payload.unknown) || 0,
+    results,
+  };
+}
+
+async function postEventBatch(events: BiometricEvent[]): Promise<BatchIngestResponse> {
+  const response = await axios.post(apiUrl('events/biometric/batch'), { events }, {
+    timeout: Number(process.env.VPS_TIMEOUT_MS) || 8_000,
+  });
+  return parseBatchIngestResponse(response.data as unknown);
 }
 
 async function fetchAllEvents(start: Date, end: Date): Promise<FetchResult> {
@@ -306,32 +395,72 @@ function enqueueRetry(state: SyncState, event: BiometricEvent, previousAttempts 
   state.retryQueue.push(retry);
 }
 
-async function deliver(state: SyncState, event: BiometricEvent, previousAttempts = 0): Promise<boolean> {
+async function deliverBatch(
+  state: SyncState,
+  events: BiometricEvent[],
+  previousAttempts = new Map<string, number>(),
+): Promise<number> {
+  if (events.length === 0) return 0;
+  if (events.length > MAX_VPS_BATCH_SIZE) {
+    let ingested = 0;
+    for (let offset = 0; offset < events.length; offset += MAX_VPS_BATCH_SIZE) {
+      ingested += await deliverBatch(
+        state,
+        events.slice(offset, offset + MAX_VPS_BATCH_SIZE),
+        previousAttempts,
+      );
+    }
+    return ingested;
+  }
   try {
-    await postEvent(event);
-    state.syncedIds.push(event.externalId);
-    state.retryQueue = state.retryQueue.filter((item) => item.event.externalId !== event.externalId);
-    return true;
+    const response = await postEventBatch(events);
+    const resultByExternalId = new Map(response.results.map((result) => [result.externalId, result]));
+    if (events.some((event) => !resultByExternalId.has(event.externalId))) {
+      throw new Error('VPS biometric batch response omitted an event result.');
+    }
+
+    let ingested = 0;
+    for (const event of events) {
+      const result = resultByExternalId.get(event.externalId)!;
+      if (result.status === 'ingested' || result.status === 'duplicate') {
+        if (!state.syncedIds.includes(event.externalId)) state.syncedIds.push(event.externalId);
+        state.retryQueue = state.retryQueue.filter(
+          (item) => item.event.externalId !== event.externalId,
+        );
+        if (result.status === 'ingested') ingested += 1;
+      } else {
+        enqueueRetry(state, event, previousAttempts.get(event.externalId) ?? 0);
+      }
+    }
+    log('info', 'VPS BATCH RESULT', {
+      submitted: events.length,
+      ingested: response.ingested,
+      duplicates: response.duplicates,
+      unknown: response.unknown,
+    });
+    return ingested;
   } catch (error) {
     const response = axios.isAxiosError(error) ? error.response : undefined;
     log('error', 'ERROR DETAILS', {
-      stage: 'vps_post',
-      externalId: event.externalId,
+      stage: 'vps_batch_post',
+      count: events.length,
       status: response?.status,
       message: error instanceof Error ? error.message : String(error),
     });
-    enqueueRetry(state, event, previousAttempts);
-    return false;
+    for (const event of events) {
+      enqueueRetry(state, event, previousAttempts.get(event.externalId) ?? 0);
+    }
+    return 0;
   }
 }
 
 async function processRetries(state: SyncState): Promise<number> {
   const due = state.retryQueue.filter((item) => Date.parse(item.nextAttemptAt) <= Date.now());
-  let synced = 0;
-  for (const item of due) {
-    if (await deliver(state, item.event, item.attempts)) synced += 1;
-  }
-  return synced;
+  return deliverBatch(
+    state,
+    due.map((item) => item.event),
+    new Map(due.map((item) => [item.event.externalId, item.attempts])),
+  );
 }
 
 export default async function sync(source: SyncSource = 'scheduled'): Promise<void> {
@@ -345,7 +474,7 @@ export default async function sync(source: SyncSource = 'scheduled'): Promise<vo
     log('info', 'SYNC CYCLE STARTED', { source });
     const now = new Date();
     const dailyWindow = dailySyncWindow(now);
-    if (now < dailyWindow.start) {
+    if (!syncAllowedAt(source, now, dailyWindow) && now < dailyWindow.start) {
       log('info', 'SYNC WINDOW NOT OPEN', {
         opensAt: dailyWindow.start.toISOString(),
         opensAtManila: formatManilaTime(dailyWindow.start),
@@ -353,7 +482,7 @@ export default async function sync(source: SyncSource = 'scheduled'): Promise<vo
       });
       return;
     }
-    if (now >= dailyWindow.end) {
+    if (!syncAllowedAt(source, now, dailyWindow) && now >= dailyWindow.end) {
       log('info', 'SYNC WINDOW CLOSED', {
         closedAt: dailyWindow.end.toISOString(),
         closedAtManila: formatManilaTime(dailyWindow.end),
@@ -372,7 +501,7 @@ export default async function sync(source: SyncSource = 'scheduled'): Promise<vo
     }
     let synced = await processRetries(state);
     const end = now;
-    const eventWindow = eventWindowStart(state.lastSeenAt, dailyWindow);
+    const eventWindow = eventWindowStart(state.lastSeenAt, dailyWindow, source, end);
     const start = eventWindow.start;
 
     const result = await fetchAllEvents(start, end);
@@ -400,9 +529,7 @@ export default async function sync(source: SyncSource = 'scheduled'): Promise<vo
       mode: eventWindow.mode,
     });
 
-    for (const event of pending) {
-      if (await deliver(state, event)) synced += 1;
-    }
+    synced += await deliverBatch(state, pending);
     if (result.complete) state.lastSeenAt = end.toISOString();
     await saveState(state);
     log('info', 'SYNC SUCCESS COUNT', { synced, queued: state.retryQueue.length });

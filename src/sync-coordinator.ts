@@ -1,4 +1,9 @@
-export type SyncReason = 'scheduled' | 'morning_catch_up' | 'manual' | 'biometric_trigger';
+export type SyncReason =
+  | 'scheduled'
+  | 'morning_catch_up'
+  | 'manual'
+  | 'watchdog'
+  | 'biometric_trigger';
 
 export interface SyncCoordinatorState {
   running: boolean;
@@ -9,9 +14,10 @@ export interface SyncCoordinatorState {
 
 const REASON_PRIORITY: Record<SyncReason, number> = {
   scheduled: 0,
-  biometric_trigger: 1,
-  manual: 2,
-  morning_catch_up: 3,
+  watchdog: 1,
+  biometric_trigger: 2,
+  manual: 3,
+  morning_catch_up: 4,
 };
 
 function higherPriority(current: SyncReason | null, requested: SyncReason): SyncReason {

@@ -185,19 +185,23 @@ function messageScalars(message: ParsedAlertMessage, names: string[]): string[] 
 export function isRelevantAccessEvent(message: ParsedAlertMessage): boolean {
   const eventTypes = messageScalars(message, ['eventType', 'eventTypeString', 'type']);
   if (eventTypes.some((value) => /heartbeat|keepalive/i.test(value))) return false;
+
+  const identity = messageScalars(message, [
+    'employeeNoString', 'employeeNo', 'cardNo', 'verifyNo', 'attendanceStatus',
+  ]);
+  if (identity.some((value) => value.length > 0)) return true;
+  if (eventTypes.some((value) =>
+    /access(?:controller|control)|acsEvent|face(?:Authentication|Recognition)|fingerprint/i.test(value))) {
+    return true;
+  }
+
   const majors = messageScalars(message, ['major', 'majorEventType']);
   const minors = messageScalars(message, ['minor', 'subEventType', 'minorEventType']);
   const numericMajors = majors.map(Number).filter(Number.isFinite);
   if (numericMajors.length > 0 && !numericMajors.includes(5)) return false;
   if (numericMajors.includes(5)) return true;
-  if (eventTypes.some((value) => /^(?:AccessControllerEvent|AccessControlEvent|AcsEvent)$/i.test(value))) {
-    return true;
-  }
   if (majors.length === 0 && minors.some((value) => Number(value) === 38)) return true;
-  const identity = messageScalars(message, [
-    'employeeNoString', 'employeeNo', 'cardNo', 'verifyNo', 'attendanceStatus',
-  ]);
-  return majors.length === 0 && identity.some((value) => value.length > 0);
+  return false;
 }
 
 function safeErrorMessage(error: unknown): string {

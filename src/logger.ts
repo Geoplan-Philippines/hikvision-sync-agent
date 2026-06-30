@@ -20,6 +20,8 @@ const EVENT_NAMES: Record<string, string> = {
   'REALTIME LISTENER DISABLED': 'Real-time listener disabled',
   'REALTIME DIGEST CHALLENGE ACCEPTED': 'Real-time authentication challenge accepted',
   'BIOMETRIC TRIGGER RECEIVED': 'Biometric trigger received',
+  'REALTIME WATCHDOG STARTED': 'Real-time recovery watchdog started',
+  'VPS BATCH RESULT': 'VPS biometric batch processed',
   'ERROR DETAILS': 'Operation failed',
 };
 
