@@ -23,6 +23,7 @@ import {
   type AgentConfig,
 } from './src/config.js';
 import { CONFIG_WINDOW_HTML } from './src/window-content.js';
+import { LOGO_MARK_DATA_URI } from './src/logo-asset.js';
 import {
   HikvisionAlertStream,
   type ListenerState,
@@ -140,11 +141,12 @@ async function enableFileLogging(): Promise<void> {
   }
 }
 
+function appIcon() {
+  return nativeImage.createFromDataURL(LOGO_MARK_DATA_URI);
+}
+
 function trayIcon() {
-  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">' +
-    '<rect width="32" height="32" rx="8" fill="#1769d2"/><path d="M8 22V10h4l4 6 4-6h4v12h-4v-6l-4 6-4-6v6z" fill="white"/></svg>';
-  return nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`)
-    .resize({ width: 16, height: 16 });
+  return appIcon().resize({ width: 16, height: 16 });
 }
 
 function updateTrayMenu(): void {
@@ -178,6 +180,7 @@ function createWindow(): BrowserWindow {
     minHeight: 580,
     show: false,
     title: 'Meedo Hikvision Sync Agent',
+    icon: appIcon(),
     autoHideMenuBar: true,
     webPreferences: {
       preload: preloadPath,

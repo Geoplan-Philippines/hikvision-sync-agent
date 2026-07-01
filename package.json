@@ -1,6 +1,6 @@
 {
   "name": "hikvision-sync-agent",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Meedo Hikvision attendance synchronization tray application",
   "productName": "Meedo Hikvision Sync Agent",
   "private": true,
@@ -13,8 +13,9 @@
     "test:renderer": "npm run build && node scripts/test-renderer.mjs",
     "test:schedule": "npm run build && node scripts/test-schedule.mjs",
     "test:logger": "npm run build && node scripts/test-logger.mjs",
+    "generate-icon": "node scripts/generate-icon.mjs",
     "start": "npm run build && electron .",
-    "dist:win": "npm run build && electron-builder --win nsis --x64"
+    "dist:win": "npm run build && npm run generate-icon && electron-builder --win nsis --x64"
   },
   "keywords": [],
   "author": "",
@@ -49,7 +50,8 @@
       "output": "release"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
@@ -58,6 +60,8 @@
       "createDesktopShortcut": false,
       "createStartMenuShortcut": true,
       "runAfterFinish": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
       "include": "installer.nsh"
     }
   }
