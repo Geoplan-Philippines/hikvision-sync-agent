@@ -67,7 +67,8 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
     form { padding: 22px 22px 20px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); }
     fieldset { margin: 0 0 22px; padding: 0; border: 0; }
     fieldset:last-of-type { margin-bottom: 0; }
-    legend { display: block; width: 100%; padding: 0 0 8px; margin-bottom: 14px; border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--secondary-foreground); }
+    legend { display: flex; align-items: center; gap: 8px; width: 100%; padding: 0 0 8px; margin-bottom: 14px; border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--secondary-foreground); }
+    .step-n { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--secondary-foreground); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0; flex: none; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .full { grid-column: 1 / -1; }
     label { display: block; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--body); margin-bottom: 6px; }
@@ -145,8 +146,41 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
       main { animation: none; }
       .status-dot::after { animation: none; }
       .log-panel { transition: none; transform: none; }
+      .test-row[data-state="pending"] .test-ico { animation: none; }
       * { transition-duration: .01ms !important; }
     }
+
+    /* Guided setup (first run only) */
+    .onboard-intro { display: none; }
+    body.firstrun .onboard-intro { display: block; margin-bottom: 18px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--border)); border-radius: var(--r-md); background: var(--secondary); }
+    .onboard-intro h2 { margin: 0 0 6px; font-size: 14px; font-weight: 700; color: var(--secondary-foreground); }
+    .onboard-intro p { margin: 0 0 8px; font-size: 13px; line-height: 1.5; color: var(--secondary-foreground); }
+    .onboard-intro p:last-child { margin-bottom: 0; }
+    .onboard-intro ul { margin: 0 0 8px; padding-left: 18px; font-size: 13px; line-height: 1.55; color: var(--secondary-foreground); }
+    .onboard-intro li { margin: 2px 0; }
+    .field-help { display: none; }
+    body.firstrun .field-help { display: block; margin: 5px 0 0; font-size: 12px; line-height: 1.45; color: var(--muted); }
+
+    /* Password reveal */
+    .input-wrap { position: relative; }
+    .input-wrap > input { padding-right: 62px; }
+    .toggle-visibility { position: absolute; top: 0; right: 0; height: 38px; padding: 0 11px; border: 0; border-radius: 0 var(--r-base) var(--r-base) 0; background: transparent; color: var(--secondary-foreground); font-size: 12px; font-weight: 600; }
+    .toggle-visibility:hover { background: transparent; border-color: transparent; color: var(--primary-hover); }
+    .toggle-visibility:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+    /* Test connection results */
+    .test-results { display: none; margin-top: 14px; border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; }
+    .test-results.show { display: block; }
+    .test-row { display: flex; align-items: flex-start; gap: 10px; padding: 11px 14px; font-size: 13px; background: var(--surface); }
+    .test-row + .test-row { border-top: 1px solid var(--border); }
+    .test-ico { flex: none; width: 18px; height: 18px; margin-top: 1px; color: var(--muted); }
+    .test-row[data-state="ok"] .test-ico { color: var(--success-strong); }
+    .test-row[data-state="error"] .test-ico { color: var(--destructive-strong); }
+    .test-row[data-state="pending"] .test-ico { animation: spin .8s linear infinite; }
+    .test-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .test-title { font-weight: 600; color: var(--heading); }
+    .test-detail { color: var(--body); font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere; }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -164,36 +198,57 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
       <span class="status-dot" aria-hidden="true"></span>
       <span id="status">Loading status…</span>
     </div>
+    <div class="onboard-intro">
+      <h2>Welcome. Let's connect your attendance sync.</h2>
+      <p>This agent reads attendance from your Hikvision device and sends it to Meedo. To set it up you'll need:</p>
+      <ul>
+        <li>The device's IP address and an admin login</li>
+        <li>Your Meedo API address</li>
+        <li>The daily hours you want it to run</li>
+      </ul>
+      <p>Fill in the three steps below, then use Test connection to check everything before you save.</p>
+    </div>
     <form id="config-form">
       <fieldset>
-        <legend>Hikvision device</legend>
+        <legend><span class="step-n" aria-hidden="true">1</span> Connect the device</legend>
         <div class="grid">
-          <div><label for="host">Host<abbr class="req" title="Required">*</abbr></label><input id="host" required placeholder="192.168.1.64"></div>
-          <div><label for="username">Username<abbr class="req" title="Required">*</abbr></label><input id="username" required placeholder="admin"></div>
-          <div class="full"><label for="password">Password<abbr class="req" title="Required">*</abbr></label><input id="password" type="password" required autocomplete="new-password"></div>
+          <div><label for="host">Host<abbr class="req" title="Required">*</abbr></label><input id="host" required placeholder="192.168.1.64"><p class="field-help">The device's IP address on your network. Add :port only if it isn't 80, e.g. 192.168.1.64:8000.</p></div>
+          <div><label for="username">Username<abbr class="req" title="Required">*</abbr></label><input id="username" required placeholder="admin"><p class="field-help">An admin account that can sign in to the device's web page.</p></div>
+          <div class="full"><label for="password">Password<abbr class="req" title="Required">*</abbr></label><div class="input-wrap"><input id="password" type="password" required autocomplete="new-password"><button type="button" class="toggle-visibility" id="toggle-password" aria-label="Show password" aria-pressed="false">Show</button></div><p class="field-help">Used only to read attendance. Stored locally on this PC.</p></div>
         </div>
       </fieldset>
       <fieldset>
-        <legend>Sync destination</legend>
+        <legend><span class="step-n" aria-hidden="true">2</span> Choose the destination</legend>
         <div class="grid">
-          <div class="full"><label for="vps">API base URL<abbr class="req" title="Required">*</abbr></label><input id="vps" type="url" required placeholder="https://api.example.com"></div>
+          <div class="full"><label for="vps">API base URL<abbr class="req" title="Required">*</abbr></label><input id="vps" type="url" required placeholder="https://api.example.com"><p class="field-help">Your Meedo attendance API address. Ask your administrator if you're unsure.</p></div>
           <div class="full check"><label><input id="realtime" type="checkbox"> Enable real-time biometric trigger (scheduled recovery remains active)</label></div>
         </div>
       </fieldset>
       <fieldset>
-        <legend>Schedule (Asia/Manila)</legend>
+        <legend><span class="step-n" aria-hidden="true">3</span> Set the schedule</legend>
         <div class="grid">
-          <div class="full"><label for="interval">Sync interval (minutes)<abbr class="req" title="Required">*</abbr></label><input id="interval" type="number" min="1" max="1440" step="1" required></div>
-          <div><label for="start">Daily start<abbr class="req" title="Required">*</abbr></label><input id="start" type="time" required></div>
+          <div class="full"><label for="interval">Sync interval (minutes)<abbr class="req" title="Required">*</abbr></label><input id="interval" type="number" min="1" max="1440" step="1" required><p class="field-help">How often attendance is pulled during the daily window below.</p></div>
+          <div><label for="start">Daily start<abbr class="req" title="Required">*</abbr></label><input id="start" type="time" required><p class="field-help">Times use the device's timezone, Asia/Manila.</p></div>
           <div><label for="end">Daily end<abbr class="req" title="Required">*</abbr></label><input id="end" type="time" required></div>
         </div>
       </fieldset>
       <div class="actions">
         <button class="primary" id="save" type="submit">Save and restart</button>
+        <button id="test" type="button">Test connection</button>
         <button id="sync" type="button">Sync now</button>
         <button id="logs" type="button">Open logs</button>
         <button id="hide" type="button">Hide to tray</button>
         <button class="danger" id="uninstall" type="button">Uninstall permanently</button>
+      </div>
+      <div id="test-results" class="test-results" role="status" aria-live="polite">
+        <div class="test-row" id="test-hik" data-state="pending">
+          <span class="test-ico" aria-hidden="true"></span>
+          <span class="test-text"><span class="test-title">Hikvision device</span><span class="test-detail"></span></span>
+        </div>
+        <div class="test-row" id="test-vps" data-state="pending">
+          <span class="test-ico" aria-hidden="true"></span>
+          <span class="test-text"><span class="test-title">Meedo API</span><span class="test-detail"></span></span>
+        </div>
       </div>
       <div id="message" role="alert" aria-live="assertive"></div>
     </form>
@@ -298,6 +353,7 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
       fields.start.value = config.SYNC_START_TIME || '09:00';
       fields.end.value = config.SYNC_END_TIME || '20:00';
       fields.realtime.checked = config.REALTIME_ENABLED !== false;
+      document.body.classList.toggle('firstrun', !config.HIKVISION_HOST && !config.VPS_URL);
       await refreshStatus();
     }
     function visibleLogs() {
@@ -373,6 +429,53 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
       });
       showMessage(result.message, !result.ok);
     });
+    const togglePassword = document.getElementById('toggle-password');
+    togglePassword.addEventListener('click', () => {
+      const reveal = fields.password.type === 'password';
+      fields.password.type = reveal ? 'text' : 'password';
+      togglePassword.textContent = reveal ? 'Hide' : 'Show';
+      togglePassword.setAttribute('aria-label', reveal ? 'Hide password' : 'Show password');
+      togglePassword.setAttribute('aria-pressed', String(reveal));
+      fields.password.focus();
+    });
+    const testButton = document.getElementById('test');
+    const testResults = document.getElementById('test-results');
+    const TEST_ICONS = {
+      pending: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>',
+      ok: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>',
+      error: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>'
+    };
+    function setTestRow(id, state, detail) {
+      const row = document.getElementById(id);
+      row.dataset.state = state;
+      row.querySelector('.test-ico').innerHTML = TEST_ICONS[state] || TEST_ICONS.pending;
+      row.querySelector('.test-detail').textContent = detail || '';
+    }
+    function testMessage(result) { return result.detail ? result.message + ' ' + result.detail : result.message; }
+    async function runTest() {
+      if (!api) return;
+      testResults.classList.add('show');
+      setTestRow('test-hik', 'pending', 'Checking…');
+      setTestRow('test-vps', 'pending', 'Checking…');
+      testButton.disabled = true;
+      const label = testButton.textContent;
+      testButton.textContent = 'Testing…';
+      try {
+        const result = await api.testConnection({
+          HIKVISION_HOST: fields.host.value, HIKVISION_USER: fields.username.value,
+          HIKVISION_PASS: fields.password.value, VPS_URL: fields.vps.value
+        });
+        setTestRow('test-hik', result.hikvision.ok ? 'ok' : 'error', testMessage(result.hikvision));
+        setTestRow('test-vps', result.vps.ok ? 'ok' : 'error', testMessage(result.vps));
+      } catch (error) {
+        setTestRow('test-hik', 'error', 'The test could not run: ' + String(error));
+        setTestRow('test-vps', 'error', 'The test could not run.');
+      } finally {
+        testButton.disabled = false;
+        testButton.textContent = label;
+      }
+    }
+    testButton.addEventListener('click', () => void runTest());
     document.getElementById('sync').addEventListener('click', async () => { showMessage((await api.syncNow()).message); await refreshStatus(); });
     document.getElementById('logs').addEventListener('click', () => void openLogViewer());
     document.getElementById('hide').addEventListener('click', () => api.hideWindow());

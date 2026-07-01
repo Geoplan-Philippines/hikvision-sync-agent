@@ -24,6 +24,7 @@ import {
 } from './src/config.js';
 import { CONFIG_WINDOW_HTML } from './src/window-content.js';
 import { LOGO_MARK_DATA_URI } from './src/logo-asset.js';
+import { probeHikvision, probeVps } from './src/probe.js';
 import {
   HikvisionAlertStream,
   type ListenerState,
@@ -493,6 +494,14 @@ function registerIpcHandlers(): void {
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
+  });
+  ipcMain.handle('test:connection', async (_event, value: unknown) => {
+    const config = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+    const [hikvision, vps] = await Promise.all([
+      probeHikvision(String(config.HIKVISION_HOST ?? ''), String(config.HIKVISION_USER ?? ''), String(config.HIKVISION_PASS ?? '')),
+      probeVps(String(config.VPS_URL ?? '')),
+    ]);
+    return { hikvision, vps };
   });
   ipcMain.handle('app:uninstall', () => launchUninstaller());
 }

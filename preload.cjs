@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('meedoAgent', {
   getConfig: () => ipcRenderer.invoke('config:get'),
   saveConfig: (config) => ipcRenderer.invoke('config:save', config),
+  testConnection: (config) => ipcRenderer.invoke('test:connection', config),
   getStatus: () => ipcRenderer.invoke('status:get'),
   syncNow: () => ipcRenderer.invoke('sync:now'),
   getLogs: () => ipcRenderer.invoke('logs:get'),
