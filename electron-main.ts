@@ -29,6 +29,11 @@ import {
   HikvisionAlertStream,
   type ListenerState,
 } from './src/alert-stream.js';
+import {
+  isHikvisionAuthenticationHalted,
+  onHikvisionAuthenticationHalted,
+  resetHikvisionAuthentication,
+} from './src/hikvision-auth.js';
 import { writeLog as log } from './src/logger.js';
 import {
   SingleFlightSyncCoordinator,
@@ -41,8 +46,12 @@ const logPath = path.join(appDirectory, 'agent.log');
 const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const REALTIME_WATCHDOG_MS = 60_000;
+// Cooldown before auto-clearing an authentication halt and retrying, backing off per
+// consecutive halt so a device with genuinely-wrong credentials is not hammered.
+const AUTH_RECOVERY_DELAYS_MS = [5, 15, 30, 60].map((minutes) => minutes * 60_000);
+// Startup-only guard against a stale oversized log left by a previous session; the log is
+// otherwise cleared at the end of each daily sync window (see endDailyWindow).
 const MAX_AGENT_LOG_BYTES = 5 * 1024 * 1024;
-const LOG_MAINTENANCE_INTERVAL_MS = 10 * 60 * 1000;
 
 interface AgentStatus {
   message: string;
@@ -61,8 +70,8 @@ let tray: Tray | null = null;
 let syncTimer: NodeJS.Timeout | null = null;
 let dailyLifecycleTimer: NodeJS.Timeout | null = null;
 let realtimeWatchdogTimer: NodeJS.Timeout | null = null;
-let logMaintenanceTimer: NodeJS.Timeout | null = null;
-let logMaintenanceRunning = false;
+let authRecoveryTimer: NodeJS.Timeout | null = null;
+let authRecoveryAttempt = 0;
 let syncInProgress = false;
 let currentConfig: AgentConfig | null = null;
 let logStream: WriteStream | null = null;
@@ -96,30 +105,18 @@ async function enforceLogSizeLimit(): Promise<number> {
   }
 }
 
-async function maintainLogSize(): Promise<void> {
-  if (logMaintenanceRunning) return;
-  logMaintenanceRunning = true;
+async function clearLogFile(reason: string): Promise<void> {
   try {
-    const clearedBytes = await enforceLogSizeLimit();
-    if (clearedBytes > 0) {
-      log('warn', 'LOG SIZE LIMIT APPLIED', {
-        clearedBytes,
-        maxBytes: MAX_AGENT_LOG_BYTES,
-      });
-    }
+    await fs.mkdir(appDirectory, { recursive: true });
+    await fs.truncate(logPath, 0).catch(async () => fs.writeFile(logPath, ''));
+    log('info', 'LOGS CLEARED', { reason });
   } catch (error) {
     log('error', 'ERROR DETAILS', {
-      stage: 'log_maintenance',
+      stage: 'log_clear',
+      reason,
       message: error instanceof Error ? error.message : String(error),
     });
-  } finally {
-    logMaintenanceRunning = false;
   }
-}
-
-function startLogMaintenance(): void {
-  if (logMaintenanceTimer) return;
-  logMaintenanceTimer = setInterval(() => void maintainLogSize(), LOG_MAINTENANCE_INTERVAL_MS);
 }
 
 async function enableFileLogging(): Promise<void> {
@@ -158,6 +155,7 @@ function updateTrayMenu(): void {
     { type: 'separator' },
     { label: 'Open settings', click: () => showWindow() },
     { label: 'Sync now', enabled: Boolean(currentConfig) && !syncInProgress, click: () => void requestSync('manual') },
+    { label: 'Reconnect now', enabled: Boolean(currentConfig), click: () => reconnectHikvision('manual') },
     { label: 'View logs', click: () => openLogViewer() },
     { type: 'separator' },
     { label: 'Uninstall permanently…', click: () => void launchUninstaller() },
@@ -291,6 +289,9 @@ async function executeSyncCycle(reason: SyncReason): Promise<void> {
 
     setStatus('Synchronizing…', { running: true });
     await module.default(reason);
+    // A sync that finished without the auth being (re)halted proves credentials work,
+    // so clear the recovery backoff. Guarded because a halted sync completes trivially.
+    if (!isHikvisionAuthenticationHalted()) authRecoveryAttempt = 0;
     const completedAt = new Date().toISOString();
     setStatus('Running in system tray.', {
       running: false,
@@ -331,6 +332,35 @@ function startRealtimeWatchdog(): void {
   log('info', 'REALTIME WATCHDOG STARTED', { intervalMs: REALTIME_WATCHDOG_MS });
 }
 
+function cancelAuthRecovery(): void {
+  if (authRecoveryTimer) clearTimeout(authRecoveryTimer);
+  authRecoveryTimer = null;
+}
+
+function scheduleAuthRecovery(): void {
+  if (authRecoveryTimer || forceQuit || !currentConfig) return;
+  const index = Math.min(authRecoveryAttempt, AUTH_RECOVERY_DELAYS_MS.length - 1);
+  const delayMs = AUTH_RECOVERY_DELAYS_MS[index];
+  authRecoveryAttempt += 1;
+  log('warn', 'HIKVISION AUTH RECOVERY SCHEDULED', { delayMs, attempt: authRecoveryAttempt });
+  authRecoveryTimer = setTimeout(() => {
+    authRecoveryTimer = null;
+    reconnectHikvision('auto');
+  }, delayMs);
+}
+
+/** Clears an authentication halt and restarts the listener + a catch-up sync. */
+function reconnectHikvision(reason: 'auto' | 'manual'): void {
+  if (forceQuit || !currentConfig) return;
+  cancelAuthRecovery();
+  log('info', 'HIKVISION RECONNECT REQUESTED', { reason });
+  // Clearing the halt fires the stream's resume listener, which restarts it; the extra
+  // start() call is a no-op if that already happened, and covers the realtime-disabled case.
+  resetHikvisionAuthentication();
+  alertStream?.start();
+  void requestSync('manual');
+}
+
 function scheduleDailyLifecycle(): void {
   if (dailyLifecycleTimer) clearTimeout(dailyLifecycleTimer);
   if (!currentConfig || forceQuit) return;
@@ -338,7 +368,7 @@ function scheduleDailyLifecycle(): void {
   const window = configuredWindow(now, currentConfig);
   if (now >= window.start && now < window.end) {
     dailyLifecycleTimer = setTimeout(() => {
-      scheduleDailyLifecycle();
+      void endDailyWindow();
     }, Math.max(1_000, window.end.getTime() - now.getTime()));
     return;
   }
@@ -357,6 +387,13 @@ async function enterDailyWindow(): Promise<void> {
   scheduleDailyLifecycle();
 }
 
+/** Fires at the end of the daily sync window: clear the day's logs, then reschedule. */
+async function endDailyWindow(): Promise<void> {
+  await clearLogFile('daily_window_end');
+  if (!currentConfig || forceQuit) return;
+  scheduleDailyLifecycle();
+}
+
 function initializeAlertStream(): void {
   if (!currentConfig || !currentConfig.REALTIME_ENABLED) {
     setStatus(status.message, { listenerState: 'stopped' });
@@ -371,8 +408,13 @@ function initializeAlertStream(): void {
       return requestSync('biometric_trigger');
     },
     onStatusChange: (listenerStatus) => {
-      if (listenerStatus.listenerState === 'connected') startRealtimeWatchdog();
-      else stopRealtimeWatchdog();
+      if (listenerStatus.listenerState === 'connected') {
+        authRecoveryAttempt = 0;
+        cancelAuthRecovery();
+        startRealtimeWatchdog();
+      } else {
+        stopRealtimeWatchdog();
+      }
       setStatus(status.message, listenerStatus);
     },
   });
@@ -464,9 +506,7 @@ function registerIpcHandlers(): void {
     clipboard.writeText(typeof text === 'string' ? text : '');
   });
   ipcMain.handle('logs:clear', async () => {
-    await fs.mkdir(appDirectory, { recursive: true });
-    await fs.truncate(logPath, 0).catch(async () => fs.writeFile(logPath, ''));
-    log('info', 'LOGS CLEARED');
+    await clearLogFile('manual');
     return { ok: true };
   });
   ipcMain.handle('sync:now', async () => {
@@ -503,15 +543,22 @@ function registerIpcHandlers(): void {
     ]);
     return { hikvision, vps };
   });
+  ipcMain.handle('listener:reconnect', () => {
+    if (!currentConfig) return { ok: false, message: 'Save configuration first.' };
+    reconnectHikvision('manual');
+    return { ok: true, message: 'Reconnecting to the device…' };
+  });
   ipcMain.handle('app:uninstall', () => launchUninstaller());
 }
 
 async function initialize(): Promise<void> {
   dotenv.config({ path: path.join(app.getAppPath(), '.env'), quiet: true });
   await enableFileLogging();
-  startLogMaintenance();
   app.setAppUserModelId('com.geoplan.meedo.hikvision-sync-agent');
   registerIpcHandlers();
+  // Auto-recover from any authentication halt (sync client or realtime listener) after a
+  // backing-off cooldown, so the agent heals itself without a manual restart.
+  onHikvisionAuthenticationHalted(() => scheduleAuthRecovery());
 
   tray = new Tray(trayIcon());
   tray.on('double-click', () => showWindow());
@@ -571,7 +618,7 @@ if (!hasSingleInstanceLock) {
     if (syncTimer) clearTimeout(syncTimer);
     if (dailyLifecycleTimer) clearTimeout(dailyLifecycleTimer);
     stopRealtimeWatchdog();
-    if (logMaintenanceTimer) clearInterval(logMaintenanceTimer);
+    cancelAuthRecovery();
     alertStream?.dispose();
     logStream?.end();
   });

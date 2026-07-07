@@ -4,6 +4,7 @@ import {
   haltHikvisionAuthentication,
   isHikvisionAuthenticationHalted,
   onHikvisionAuthenticationHalted,
+  onHikvisionAuthenticationResumed,
 } from './hikvision-auth.js';
 import { writeLog as log } from './logger.js';
 
@@ -11,6 +12,9 @@ const ALERT_STREAM_PATH = '/ISAPI/Event/notification/alertStream';
 const DEFAULT_RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 const STABLE_CONNECTION_MS = 30_000;
 const MAX_BUFFER_LENGTH = 1_000_000;
+// Consecutive authenticated 401s tolerated (each reconnect rebuilds a fresh Digest
+// handshake) before halting. A single 401 after long uptime is usually a stale nonce.
+const MAX_CONSECUTIVE_AUTH_401 = 3;
 
 export type ListenerState = 'connected' | 'reconnecting' | 'stopped' | 'authentication_halted';
 
@@ -233,7 +237,9 @@ export class HikvisionAlertStream {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectWake: (() => void) | null = null;
   private debounceTimer: NodeJS.Timeout | null = null;
+  private consecutiveAuth401 = 0;
   private readonly removeAuthListener: () => void;
+  private readonly removeResumeListener: () => void;
 
   constructor(private readonly options: AlertStreamOptions) {
     this.host = options.host ?? process.env.HIKVISION_HOST;
@@ -253,6 +259,10 @@ export class HikvisionAlertStream {
         reconnectAttempt: 0,
         lastListenerError: reason,
       });
+    });
+    this.removeResumeListener = onHikvisionAuthenticationResumed(() => {
+      this.consecutiveAuth401 = 0;
+      this.start();
     });
   }
 
@@ -281,6 +291,7 @@ export class HikvisionAlertStream {
   dispose(): void {
     this.stop();
     this.removeAuthListener();
+    this.removeResumeListener();
   }
 
   private validateConfig(): void {
@@ -306,6 +317,7 @@ export class HikvisionAlertStream {
         const response = await this.openStream();
         if (!response) return;
         connectedAt = Date.now();
+        this.consecutiveAuth401 = 0;
         this.updateStatus({ listenerState: 'connected', reconnectAttempt: 0, lastListenerError: null });
         log('info', 'REALTIME LISTENER CONNECTED');
         await this.readStream(response, generation);
@@ -384,10 +396,18 @@ export class HikvisionAlertStream {
   private async acceptStreamResponse(response: Response, credentialsSent: boolean): Promise<Response | null> {
     if (response.status === 401 && credentialsSent) {
       await response.body?.cancel().catch(() => undefined);
+      this.consecutiveAuth401 += 1;
+      if (this.consecutiveAuth401 < MAX_CONSECUTIVE_AUTH_401) {
+        // Likely a stale device nonce; throw so the backoff loop reconnects with a
+        // fresh Digest handshake instead of permanently halting.
+        throw new Error(
+          `Authenticated alert-stream request returned 401 (attempt ${this.consecutiveAuth401}); retrying with a fresh handshake.`,
+        );
+      }
       const reason = 'Authenticated alert-stream request was rejected; restart or save configuration to retry.';
       haltHikvisionAuthentication(reason);
       log('error', 'HIKVISION AUTHENTICATION HALTED', {
-        source: 'realtime_listener', status: 401, reason,
+        source: 'realtime_listener', status: 401, attempts: this.consecutiveAuth401, reason,
       });
       return null;
     }

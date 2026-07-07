@@ -236,6 +236,7 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
         <button class="primary" id="save" type="submit">Save and restart</button>
         <button id="test" type="button">Test connection</button>
         <button id="sync" type="button">Sync now</button>
+        <button id="reconnect" type="button">Reconnect listener</button>
         <button id="logs" type="button">Open logs</button>
         <button id="hide" type="button">Hide to tray</button>
         <button class="danger" id="uninstall" type="button">Uninstall permanently</button>
@@ -283,7 +284,15 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
     const logEntriesElement = document.getElementById('log-entries');
     let logEntries = [];
     let lastFocused = null;
-    function showMessage(text, error) { message.textContent = text; message.className = error ? 'error' : ''; }
+    let messageTimer = null;
+    function showMessage(text, error, autoClearMs) {
+      if (messageTimer) { clearTimeout(messageTimer); messageTimer = null; }
+      message.textContent = text; message.className = error ? 'error' : '';
+      if (autoClearMs) {
+        messageTimer = setTimeout(() => { message.textContent = ''; message.className = ''; messageTimer = null; }, autoClearMs);
+      }
+    }
+    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const ACRONYMS = { id: 'ID', url: 'URL', uri: 'URI', ip: 'IP', api: 'API', vps: 'VPS', http: 'HTTP', https: 'HTTPS', ok: 'OK', ms: 'ms', json: 'JSON', xml: 'XML' };
     function humanizeKey(key) {
       const words = String(key).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().split(/\\s+/);
@@ -342,6 +351,16 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
       ].filter(Boolean).join(' · ');
       status.textContent = value.message + (value.lastRun ? ' Last run: ' + new Date(value.lastRun).toLocaleString() + '.' : '') + (details ? ' ' + details + '.' : '');
       statusBar.dataset.state = statusState(value);
+      return value;
+    }
+    async function waitForListenerConnected(timeoutMs) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const value = await refreshStatus();
+        if (String(value.listenerState || '').toLowerCase() === 'connected') return true;
+        await delay(500);
+      }
+      return false;
     }
     async function load() {
       const config = await api.getConfig();
@@ -477,6 +496,23 @@ export const CONFIG_WINDOW_HTML = `<!doctype html>
     }
     testButton.addEventListener('click', () => void runTest());
     document.getElementById('sync').addEventListener('click', async () => { showMessage((await api.syncNow()).message); await refreshStatus(); });
+    document.getElementById('reconnect').addEventListener('click', async () => {
+      const button = document.getElementById('reconnect');
+      button.disabled = true;
+      try {
+        const result = await api.reconnect();
+        showMessage(result.message, !result.ok);
+        await refreshStatus();
+        if (result.ok && fields.realtime.checked) {
+          const connected = await waitForListenerConnected(15000);
+          showMessage(connected ? 'Listener reconnected.' : 'Still reconnecting — check the status above.', false, 6000);
+        } else if (result.ok) {
+          showMessage('Reconnect requested.', false, 6000);
+        }
+      } finally {
+        button.disabled = false;
+      }
+    });
     document.getElementById('logs').addEventListener('click', () => void openLogViewer());
     document.getElementById('hide').addEventListener('click', () => api.hideWindow());
     document.getElementById('uninstall').addEventListener('click', async () => { const result = await api.uninstall(); if (result) showMessage(result.message, !result.ok); });

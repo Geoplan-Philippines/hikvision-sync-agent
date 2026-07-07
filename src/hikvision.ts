@@ -9,6 +9,9 @@ import { writeLog as log } from './logger.js';
 const EVENT_PATH = '/ISAPI/AccessControl/AcsEvent?format=json';
 const DEFAULT_TIMEOUT_MS = 8_000;
 const MAX_REQUESTS_PER_DIGEST_SESSION = 8;
+// Extra authenticated attempts with a fresh Digest handshake before giving up on a 401.
+// A 401 after prior success is usually a stale/expired device nonce, not bad credentials.
+const AUTH_401_RETRIES = 2;
 
 export interface AttendanceQuery {
   searchId: string;
@@ -177,26 +180,7 @@ export class HikvisionClient {
 
     let response: Response;
     try {
-      this.renewSessionIfNeeded();
-      if (!this.challenge) {
-        const challengeResponse = await this.fetchWithTimeout(url, options);
-        if (challengeResponse.status !== 401) {
-          response = challengeResponse;
-        } else {
-          const header = challengeResponse.headers.get('www-authenticate');
-          await challengeResponse.arrayBuffer().catch(() => undefined);
-          if (!header) throw new Error('Device returned 401 without a WWW-Authenticate challenge.');
-          this.challenge = parseDigestChallenge(header);
-          this.nonceCount = 0;
-          log('info', 'DIGEST CHALLENGE ACCEPTED', {
-            algorithm: this.challenge.algorithm,
-            qop: this.challenge.qop ?? 'legacy',
-          });
-          response = await this.authenticatedFetch(url, options, method);
-        }
-      } else {
-        response = await this.authenticatedFetch(url, options, method);
-      }
+      response = await this.sendAuthenticated(url, options, method);
     } catch (error) {
       log('error', 'ERROR DETAILS', { stage: 'hikvision_request', url, ...getErrorDetails(error) });
       return null;
@@ -211,7 +195,7 @@ export class HikvisionClient {
         method,
         url,
         status: 401,
-        reason: 'Authenticated request was rejected. No retry was attempted to avoid account lockout.',
+        reason: `Authenticated request was still rejected after ${AUTH_401_RETRIES} fresh-handshake retries.`,
       });
       return null;
     }
@@ -255,6 +239,40 @@ export class HikvisionClient {
         return null;
       }
     }
+  }
+
+  private async sendAuthenticated(url: string, options: RequestInit, method: string): Promise<Response> {
+    let response = await this.performRequest(url, options, method);
+    // A 401 here means the authenticated request was rejected — usually a stale device
+    // nonce after long uptime. Retry with a brand-new challenge before halting, so
+    // transient 401s self-heal while genuinely-wrong credentials still stop after a bound.
+    for (let retry = 0; response.status === 401 && retry < AUTH_401_RETRIES; retry += 1) {
+      await response.arrayBuffer().catch(() => undefined);
+      this.resetDigestSession();
+      log('info', 'DIGEST SESSION RETRY', {
+        attempt: retry + 1,
+        reason: 'Authenticated request returned 401; retrying with a fresh Digest handshake.',
+      });
+      response = await this.performRequest(url, options, method);
+    }
+    return response;
+  }
+
+  private async performRequest(url: string, options: RequestInit, method: string): Promise<Response> {
+    this.renewSessionIfNeeded();
+    if (this.challenge) return this.authenticatedFetch(url, options, method);
+    const challengeResponse = await this.fetchWithTimeout(url, options);
+    if (challengeResponse.status !== 401) return challengeResponse;
+    const header = challengeResponse.headers.get('www-authenticate');
+    await challengeResponse.arrayBuffer().catch(() => undefined);
+    if (!header) throw new Error('Device returned 401 without a WWW-Authenticate challenge.');
+    this.challenge = parseDigestChallenge(header);
+    this.nonceCount = 0;
+    log('info', 'DIGEST CHALLENGE ACCEPTED', {
+      algorithm: this.challenge.algorithm,
+      qop: this.challenge.qop ?? 'legacy',
+    });
+    return this.authenticatedFetch(url, options, method);
   }
 
   private authenticatedFetch(url: string, options: RequestInit, method: string): Promise<Response> {

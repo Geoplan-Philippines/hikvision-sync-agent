@@ -1,6 +1,6 @@
 {
   "name": "hikvision-sync-agent",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Meedo Hikvision attendance synchronization tray application",
   "productName": "Meedo Hikvision Sync Agent",
   "private": true,

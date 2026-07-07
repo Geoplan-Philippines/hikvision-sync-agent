@@ -3,6 +3,10 @@ import {
   IncrementalAlertParser,
   isRelevantAccessEvent,
 } from '../dist/src/alert-stream.js';
+import {
+  isHikvisionAuthenticationHalted,
+  resetHikvisionAuthentication,
+} from '../dist/src/hikvision-auth.js';
 import { SingleFlightSyncCoordinator } from '../dist/src/sync-coordinator.js';
 import { parseBatchIngestResponse } from '../dist/src/sync.js';
 
@@ -155,12 +159,55 @@ assert(unsupportedFetches === 1, 'Unsupported stream response was retried.');
 assert(unsupported.currentStatus.listenerState === 'stopped', 'Unsupported stream was not stopped.');
 unsupported.dispose();
 
-let rejectedAuthFetches = 0;
-const authRejected = new HikvisionAlertStream({
+// A transient authenticated 401 (stale device nonce) recovers with a fresh handshake
+// instead of permanently halting.
+resetHikvisionAuthentication();
+let transientFetches = 0;
+let transientTriggered = 0;
+let transientController;
+const transientChallenge = { 'www-authenticate': 'Digest realm=test, nonce=abc, qop=auth' };
+const transient = new HikvisionAlertStream({
+  host: 'device.test', username: 'admin', password: 'secret',
+  reconnectDelaysMs: [1, 2, 5], random: () => 0.5, debounceMs: 5,
+  fetchImpl: async (_url, init) => {
+    transientFetches += 1;
+    // 1: challenge, 2: authenticated → stale 401, 3: challenge, 4: authenticated → stream.
+    if (transientFetches === 2) return new Response(null, { status: 401 });
+    if (transientFetches === 1 || transientFetches === 3) {
+      return new Response(null, { status: 401, headers: transientChallenge });
+    }
+    assert(new Headers(init.headers).has('authorization'), 'Recovered stream request was missing Digest.');
+    return new Response(new ReadableStream({
+      start(controller) {
+        transientController = controller;
+        controller.enqueue(new TextEncoder().encode(accessJson));
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  },
+  onTrigger: () => { transientTriggered += 1; },
+});
+transient.start();
+await new Promise((resolve) => setTimeout(resolve, 40));
+assert(!isHikvisionAuthenticationHalted(), 'Transient authenticated 401 wrongly halted authentication.');
+assert(
+  transient.currentStatus.listenerState === 'connected',
+  'Stream did not recover after a transient authenticated 401.',
+);
+assert(transientTriggered === 1, 'Recovered stream did not process events.');
+transient.stop();
+transientController?.close();
+transient.dispose();
+
+// Repeated authenticated 401s (genuinely bad credentials) still halt after the threshold.
+resetHikvisionAuthentication();
+let haltFetches = 0;
+const authHalt = new HikvisionAlertStream({
   host: 'device.test', username: 'admin', password: 'wrong',
+  reconnectDelaysMs: [1, 2, 5], random: () => 0.5,
   fetchImpl: async () => {
-    rejectedAuthFetches += 1;
-    return rejectedAuthFetches === 1
+    haltFetches += 1;
+    // Odd fetches are the Digest challenge; even fetches are the rejected authenticated request.
+    return haltFetches % 2 === 1
       ? new Response(null, {
           status: 401,
           headers: { 'www-authenticate': 'Digest realm=test, nonce=def, qop=auth' },
@@ -169,15 +216,15 @@ const authRejected = new HikvisionAlertStream({
   },
   onTrigger: () => undefined,
 });
-authRejected.start();
-await new Promise((resolve) => setTimeout(resolve, 10));
-authRejected.start();
-await new Promise((resolve) => setTimeout(resolve, 5));
-assert(rejectedAuthFetches === 2, 'Authenticated 401 retried credentials.');
+authHalt.start();
+await new Promise((resolve) => setTimeout(resolve, 60));
+assert(isHikvisionAuthenticationHalted(), 'Repeated authenticated 401s did not halt authentication.');
 assert(
-  authRejected.currentStatus.listenerState === 'authentication_halted',
-  'Authenticated 401 did not halt authentication.',
+  authHalt.currentStatus.listenerState === 'authentication_halted',
+  'Repeated authenticated 401s did not enter authentication_halted.',
 );
-authRejected.dispose();
+assert(haltFetches >= 6, 'Authenticated 401 did not retry a fresh handshake before halting.');
+authHalt.dispose();
+resetHikvisionAuthentication();
 
-console.log('Real-time parser, filtering, debounce, reconnect, auth, and single-flight tests passed.');
+console.log('Real-time parser, filtering, debounce, reconnect, auth-recovery, and single-flight tests passed.');

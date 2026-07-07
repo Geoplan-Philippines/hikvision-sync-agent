@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('meedoAgent', {
   testConnection: (config) => ipcRenderer.invoke('test:connection', config),
   getStatus: () => ipcRenderer.invoke('status:get'),
   syncNow: () => ipcRenderer.invoke('sync:now'),
+  reconnect: () => ipcRenderer.invoke('listener:reconnect'),
   getLogs: () => ipcRenderer.invoke('logs:get'),
   clearLogs: () => ipcRenderer.invoke('logs:clear'),
   copyLogs: (text) => ipcRenderer.invoke('logs:copy', text),
